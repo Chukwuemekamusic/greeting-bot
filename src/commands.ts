@@ -19,6 +19,10 @@ const commands = [
         name: 'expiry',
         description: 'Check ENS domain expiration date',
     },
+    {
+        name: 'portfolio',
+        description: 'View ENS domain portfolio',
+    },
 ] as const satisfies BotCommand[]
 
 export default commands

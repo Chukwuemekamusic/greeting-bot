@@ -9,7 +9,11 @@ import {
   ENS_REGISTRY_ABI,
 } from "../constants/ens";
 import { normalizeENSName, getTokenId, namehash } from "../utils/ens";
-import type { ENSAvailabilityResult, ENSExpiryResult } from "../types/ens";
+import type {
+  ENSAvailabilityResult,
+  ENSExpiryResult,
+  ENSUserPortfolio,
+} from "../types/ens";
 
 const MAINNET_RPC_URL = process.env.MAINNET_RPC_URL;
 
@@ -31,9 +35,12 @@ export async function checkAvailability(
   try {
     // Normalize and validate the domain name
     const { normalized, valid, reason } = normalizeENSName(domainName);
+    const fullName = `${normalized}.eth`;
 
     if (!valid) {
       return {
+        label: normalized,
+        fullName,
         available: false,
         valid: false,
         reason,
@@ -50,6 +57,8 @@ export async function checkAvailability(
 
     if (!isAvailable) {
       return {
+        label: normalized,
+        fullName,
         available: false,
         valid: true,
         reason: "Domain is already registered",
@@ -69,6 +78,8 @@ export async function checkAvailability(
       const priceEth = Number(formatEther(totalPrice)).toFixed(4);
 
       return {
+        label: normalized,
+        fullName,
         available: true,
         valid: true,
         priceEth,
@@ -77,6 +88,8 @@ export async function checkAvailability(
       // If price fetch fails, still return availability
       console.error("Error fetching price:", priceError);
       return {
+        label: normalized,
+        fullName,
         available: true,
         valid: true,
         reason: "Available (price unavailable)",
@@ -85,6 +98,8 @@ export async function checkAvailability(
   } catch (error) {
     console.error("Error checking availability:", error);
     return {
+      label: "",
+      fullName: "",
       available: false,
       valid: false,
       reason: "Error checking availability",
@@ -101,9 +116,12 @@ export async function checkExpiry(
   try {
     // Normalize and validate the domain name
     const { normalized, valid, reason } = normalizeENSName(domainName);
+    const fullName = `${normalized}.eth`;
 
     if (!valid) {
       return {
+        label: normalized,
+        fullName,
         valid: false,
         registered: false,
         reason,
@@ -111,7 +129,7 @@ export async function checkExpiry(
     }
 
     const tokenId = getTokenId(normalized);
-    const nodeHash = namehash(`${normalized}.eth`);
+    const nodeHash = namehash(fullName);
 
     // Check expiry timestamp from BaseRegistrar
     let expiryTimestamp: bigint;
@@ -128,6 +146,8 @@ export async function checkExpiry(
       // If expires is 0, domain is not registered
       if (expiryTimestamp === 0n) {
         return {
+          label: normalized,
+          fullName,
           valid: true,
           registered: false,
           reason: "Domain is not registered",
@@ -149,6 +169,8 @@ export async function checkExpiry(
     } catch (error) {
       // Domain not registered or error querying
       return {
+        label: normalized,
+        fullName,
         valid: true,
         registered: false,
         reason: "Domain is not registered or unavailable",
@@ -184,6 +206,8 @@ export async function checkExpiry(
       isExpired && now < expiryTimestampNum + TIME.GRACE_PERIOD_SECONDS;
 
     return {
+      label: normalized,
+      fullName,
       valid: true,
       registered: true,
       expirationDate: expiryDate,
@@ -197,9 +221,129 @@ export async function checkExpiry(
   } catch (error) {
     console.error("Error checking expiry:", error);
     return {
+      label: "",
+      fullName: "",
       valid: false,
       registered: false,
       reason: "Error checking expiry",
     };
+  }
+}
+
+/**
+ * Checks a user's ENS portfolio
+ */
+export async function getUserPortfolio(
+  userAddress: string
+): Promise<ENSUserPortfolio> {
+  try {
+    // Query subgraph for all user's domains
+    const query = `
+    query GetUserDomains($owner: String!) {
+        account(id: $owner) {
+          domains(first: 1000, where: { parent: "0x93cdeb708b7545dc668eb9280176169d1c33cfd8ed6f04690a0bcc88a93fc4ae" }) {
+            name
+            labelName
+            createdAt
+          }
+          registrations(first: 1000) {
+            domain {
+              name
+              labelName
+            }
+            expiryDate
+            registrationDate
+          }
+        }
+      }
+    `;
+
+    const response = await fetch(ENS_CONTRACTS.SUBGRAPH_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        query,
+        variables: {
+          owner: userAddress.toLowerCase(),
+        },
+      }),
+    });
+
+    const { data } = await response.json();
+    if (!data?.account) {
+      return {
+        address: userAddress,
+        totalDomains: 0,
+        activeDomains: 0,
+        expiredDomains: 0,
+        expiringSoon: 0,
+        inGracePeriod: 0,
+        domains: [],
+      };
+    }
+    const { registrations } = data.account;
+    const now = Math.floor(Date.now() / 1000);
+
+    // Process domain data from subgraph (no contract calls for speed)
+    const domains: ENSExpiryResult[] = registrations.map((reg: any) => {
+      const label = reg.domain.labelName;
+      const fullName = reg.domain.name;
+      const expiryTimestamp = Number(reg.expiryDate);
+      const expiryDate = new Date(expiryTimestamp * 1000);
+      const daysUntilExpiry = Math.floor((expiryTimestamp - now) / 86400);
+      const isExpired = now > expiryTimestamp;
+      const inGracePeriod =
+        isExpired && now < expiryTimestamp + TIME.GRACE_PERIOD_SECONDS;
+      const gracePeriodEnds = new Date(
+        (expiryTimestamp + TIME.GRACE_PERIOD_SECONDS) * 1000
+      );
+
+      return {
+        label,
+        fullName,
+        valid: true,
+        registered: true,
+        expirationDate: expiryDate,
+        daysUntilExpiry,
+        expired: isExpired,
+        inGracePeriod,
+        gracePeriodEnds,
+        registrant: userAddress,
+      };
+    });
+
+    // Calculate stats
+    const totalDomains = domains.length;
+    const activeDomains = domains.filter((d) => !d.expired).length;
+    const expiredDomains = domains.filter((d) => d.expired).length;
+    const inGracePeriodCount = domains.filter((d) => d.inGracePeriod).length;
+    const expiringSoon = domains.filter(
+      (d) => !d.expired && d.daysUntilExpiry !== undefined && d.daysUntilExpiry <= 30
+    ).length;
+
+    // Sort by expiry date (soonest first for active, then expired domains)
+    domains.sort((a, b) => {
+      // Active domains before expired
+      if (a.expired && !b.expired) return 1;
+      if (!a.expired && b.expired) return -1;
+
+      // Within same status, sort by expiry date
+      return (a.expirationDate?.getTime() || 0) - (b.expirationDate?.getTime() || 0);
+    });
+
+    return {
+      address: userAddress,
+      totalDomains,
+      activeDomains,
+      expiredDomains,
+      expiringSoon,
+      inGracePeriod: inGracePeriodCount,
+      domains,
+    };
+  } catch (error) {
+    console.error("Error fetching user domains:", error);
+    throw error;
   }
 }

@@ -3,7 +3,9 @@ export const ENS_CONTRACTS = {
   REGISTRAR_CONTROLLER: "0x253553366Da8546fC250F225fe3d25d0C782303b" as const,
   BASE_REGISTRAR: "0x57f1887a8BF19b14fC0dF6Fd9B2acc9Af147eA85" as const,
   ENS_REGISTRY: "0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e" as const,
-} as const
+  SUBGRAPH_URL:
+    "https://api.thegraph.com/subgraphs/name/ensdomains/ens" as const,
+} as const;
 
 // Time Constants
 export const TIME = {
@@ -11,13 +13,13 @@ export const TIME = {
   MS_PER_DAY: 1000 * 60 * 60 * 24,
   GRACE_PERIOD_DAYS: 90, // ENS grace period after expiration
   GRACE_PERIOD_SECONDS: 90 * 24 * 60 * 60, // 90 days in seconds
-} as const
+} as const;
 
 // Validation Constants
 export const ENS_VALIDATION = {
   MIN_LENGTH: 3,
   SUFFIX: ".eth",
-} as const
+} as const;
 
 // ABIs
 export const CONTROLLER_ABI = [
@@ -47,7 +49,7 @@ export const CONTROLLER_ABI = [
       },
     ],
   },
-] as const
+] as const;
 
 export const BASE_REGISTRAR_ABI = [
   {
@@ -64,7 +66,7 @@ export const BASE_REGISTRAR_ABI = [
     inputs: [{ name: "tokenId", type: "uint256" }],
     outputs: [{ type: "address" }],
   },
-] as const
+] as const;
 
 export const ENS_REGISTRY_ABI = [
   {
@@ -74,4 +76,4 @@ export const ENS_REGISTRY_ABI = [
     inputs: [{ name: "node", type: "bytes32" }],
     outputs: [{ type: "address" }],
   },
-] as const
+] as const;
