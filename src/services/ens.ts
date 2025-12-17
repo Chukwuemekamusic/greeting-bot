@@ -1,9 +1,15 @@
-import { createPublicClient, http } from "viem";
+import { createPublicClient, http, formatEther } from "viem";
 import { mainnet } from "viem/chains";
-import { normalize } from "viem/ens";
-
-// ETHRegistrarController on Ethereum mainnet
-const CONTROLLER_ADDRESS = "0x253553366Da8546fC250F225fe3d25d0C782303b";
+import { readContract } from "viem/actions";
+import {
+  ENS_CONTRACTS,
+  TIME,
+  CONTROLLER_ABI,
+  BASE_REGISTRAR_ABI,
+  ENS_REGISTRY_ABI,
+} from "../constants/ens";
+import { normalizeENSName, getTokenId, namehash } from "../utils/ens";
+import type { ENSAvailabilityResult, ENSExpiryResult } from "../types/ens";
 
 const MAINNET_RPC_URL = process.env.MAINNET_RPC_URL;
 
@@ -16,58 +22,184 @@ const ethereumClient = createPublicClient({
   transport: http(MAINNET_RPC_URL),
 });
 
-export interface ENSAvailabilityResult {
-  available: boolean;
-  valid: boolean;
-  reason?: string;
-}
-
+/**
+ * Checks if an ENS domain is available for registration
+ */
 export async function checkAvailability(
   domainName: string
 ): Promise<ENSAvailabilityResult> {
   try {
-    // Remove .eth if user included it
-    const label = domainName.replace(".eth", "");
+    // Normalize and validate the domain name
+    const { normalized, valid, reason } = normalizeENSName(domainName);
 
-    // Normalize the name (handles Unicode, etc.)
-    const normalizedLabel = normalize(label);
-
-    // Check if name is valid length (3+ characters typically)
-    if (normalizedLabel.length < 3) {
+    if (!valid) {
       return {
         available: false,
         valid: false,
-        reason: "Name must be at least 3 characters",
+        reason,
       };
     }
 
-    // Query the controller's available() function
-    const isAvailable = await ethereumClient.readContract({
-      address: CONTROLLER_ADDRESS,
-      abi: [
-        {
-          name: "available",
-          type: "function",
-          stateMutability: "view",
-          inputs: [{ name: "name", type: "string" }],
-          outputs: [{ type: "bool" }],
-        },
-      ],
+    // Check availability on the controller
+    const isAvailable = await readContract(ethereumClient, {
+      address: ENS_CONTRACTS.REGISTRAR_CONTROLLER,
+      abi: CONTROLLER_ABI,
       functionName: "available",
-      args: [normalizedLabel],
+      args: [normalized],
     });
 
-    return {
-      available: isAvailable,
-      valid: true,
-      reason: isAvailable ? "Available for registration" : "Already registered",
-    };
+    if (!isAvailable) {
+      return {
+        available: false,
+        valid: true,
+        reason: "Domain is already registered",
+      };
+    }
+
+    // Get the price for 1 year registration
+    try {
+      const priceData = (await readContract(ethereumClient, {
+        address: ENS_CONTRACTS.REGISTRAR_CONTROLLER,
+        abi: CONTROLLER_ABI,
+        functionName: "rentPrice",
+        args: [normalized, TIME.SECONDS_PER_YEAR],
+      })) as { base: bigint; premium: bigint };
+
+      const totalPrice = priceData.base + priceData.premium;
+      const priceEth = Number(formatEther(totalPrice)).toFixed(4);
+
+      return {
+        available: true,
+        valid: true,
+        priceEth,
+      };
+    } catch (priceError) {
+      // If price fetch fails, still return availability
+      console.error("Error fetching price:", priceError);
+      return {
+        available: true,
+        valid: true,
+        reason: "Available (price unavailable)",
+      };
+    }
   } catch (error) {
     console.error("Error checking availability:", error);
     return {
       available: false,
       valid: false,
       reason: "Error checking availability",
+    };
+  }
+}
+
+/**
+ * Checks ENS domain expiration information
+ */
+export async function checkExpiry(
+  domainName: string
+): Promise<ENSExpiryResult> {
+  try {
+    // Normalize and validate the domain name
+    const { normalized, valid, reason } = normalizeENSName(domainName);
+
+    if (!valid) {
+      return {
+        valid: false,
+        registered: false,
+        reason,
+      };
+    }
+
+    const tokenId = getTokenId(normalized);
+    const nodeHash = namehash(`${normalized}.eth`);
+
+    // Check expiry timestamp from BaseRegistrar
+    let expiryTimestamp: bigint;
+    let registrant: string | undefined;
+
+    try {
+      expiryTimestamp = (await readContract(ethereumClient, {
+        address: ENS_CONTRACTS.BASE_REGISTRAR,
+        abi: BASE_REGISTRAR_ABI,
+        functionName: "nameExpires",
+        args: [tokenId],
+      })) as bigint;
+
+      // If expires is 0, domain is not registered
+      if (expiryTimestamp === 0n) {
+        return {
+          valid: true,
+          registered: false,
+          reason: "Domain is not registered",
+        };
+      }
+
+      // Get the registrant (NFT holder)
+      try {
+        registrant = (await readContract(ethereumClient, {
+          address: ENS_CONTRACTS.BASE_REGISTRAR,
+          abi: BASE_REGISTRAR_ABI,
+          functionName: "ownerOf",
+          args: [tokenId],
+        })) as string;
+      } catch {
+        // Registrant might not be available if domain expired beyond grace period
+        registrant = undefined;
+      }
+    } catch (error) {
+      // Domain not registered or error querying
+      return {
+        valid: true,
+        registered: false,
+        reason: "Domain is not registered or unavailable",
+      };
+    }
+
+    // Get the ENS registry owner (who controls the records)
+    let owner: string | undefined;
+    try {
+      owner = (await readContract(ethereumClient, {
+        address: ENS_CONTRACTS.ENS_REGISTRY,
+        abi: ENS_REGISTRY_ABI,
+        functionName: "owner",
+        args: [nodeHash],
+      })) as string;
+    } catch {
+      // Owner might not be set
+      owner = undefined;
+    }
+
+    // Calculate expiry details
+    const now = Math.floor(Date.now() / 1000);
+    const expiryTimestampNum = Number(expiryTimestamp);
+    const expiryDate = new Date(expiryTimestampNum * 1000);
+    const daysUntilExpiry = Math.floor((expiryTimestampNum - now) / 86400);
+    const isExpired = now > expiryTimestampNum;
+
+    // Calculate grace period
+    const gracePeriodEnds = new Date(
+      (expiryTimestampNum + TIME.GRACE_PERIOD_SECONDS) * 1000
+    );
+    const inGracePeriod =
+      isExpired && now < expiryTimestampNum + TIME.GRACE_PERIOD_SECONDS;
+
+    return {
+      valid: true,
+      registered: true,
+      expirationDate: expiryDate,
+      daysUntilExpiry,
+      expired: isExpired,
+      inGracePeriod,
+      gracePeriodEnds,
+      owner,
+      registrant,
+    };
+  } catch (error) {
+    console.error("Error checking expiry:", error);
+    return {
+      valid: false,
+      registered: false,
+      reason: "Error checking expiry",
     };
   }
 }

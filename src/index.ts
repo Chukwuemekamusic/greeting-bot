@@ -1,6 +1,6 @@
 import { makeTownsBot } from "@towns-protocol/bot";
 import commands from "./commands";
-import { checkAvailability } from "./services/ens";
+import { checkAvailability, checkExpiry } from "./services/ens";
 
 const bot = await makeTownsBot(
   process.env.APP_PRIVATE_DATA!,
@@ -16,7 +16,8 @@ bot.onSlashCommand("help", async (handler, { channelId }) => {
     "**Available Commands:**\n\n" +
       "• `/help` - Show this help message\n" +
       "• `/time` - Get the current time\n" +
-      "• `/check <domain>` - Check ENS domain availability\n\n" +
+      "• `/check <domain>` - Check ENS domain availability\n" +
+      "• `/expiry <domain>` - Check ENS domain expiration date\n\n" +
       "**Message Triggers:**\n\n" +
       "• Mention me - I'll respond\n" +
       "• React with 👋 - I'll wave back" +
@@ -32,7 +33,6 @@ bot.onSlashCommand("time", async (handler, { channelId }) => {
 });
 
 bot.onSlashCommand("check", async (handler, { channelId, args }) => {
-  // Check if domain name was provided
   if (!args || args.length === 0) {
     await handler.sendMessage(
       channelId,
@@ -42,8 +42,6 @@ bot.onSlashCommand("check", async (handler, { channelId, args }) => {
   }
 
   const domainName = args[0];
-
-  // Send a "checking..." message first
   await handler.sendMessage(
     channelId,
     `Checking availability for **${domainName}.eth**...`
@@ -61,10 +59,11 @@ bot.onSlashCommand("check", async (handler, { channelId, args }) => {
     }
 
     if (result.available) {
-      await handler.sendMessage(
-        channelId,
-        `✅ **${domainName}.eth** is available for registration!`
-      );
+      let message = `✅ **${domainName}.eth** is available for registration!`;
+      if (result.priceEth) {
+        message += `\n💰 Price: ${result.priceEth} ETH/year`;
+      }
+      await handler.sendMessage(channelId, message);
     } else {
       await handler.sendMessage(
         channelId,
@@ -76,6 +75,90 @@ bot.onSlashCommand("check", async (handler, { channelId, args }) => {
     await handler.sendMessage(
       channelId,
       "❌ An error occurred while checking domain availability. Please try again later."
+    );
+  }
+});
+
+bot.onSlashCommand("expiry", async (handler, { channelId, args }) => {
+  if (!args || args.length === 0) {
+    await handler.sendMessage(
+      channelId,
+      "⚠️ Please provide a domain name to check.\n\nUsage: `/expiry <domain>`\nExample: `/expiry vitalik`"
+    );
+    return;
+  }
+
+  const domainName = args[0];
+  await handler.sendMessage(
+    channelId,
+    `Checking expiry for **${domainName}.eth**...`
+  );
+
+  try {
+    const result = await checkExpiry(domainName);
+
+    if (!result.valid) {
+      await handler.sendMessage(
+        channelId,
+        `⚠️ Invalid domain: ${result.reason}`
+      );
+      return;
+    }
+
+    if (!result.registered) {
+      await handler.sendMessage(
+        channelId,
+        `ℹ️ **${domainName}.eth** is not registered.`
+      );
+      return;
+    }
+
+    // Build the expiry message
+    let message = `**${domainName}.eth** Expiry Information\n\n`;
+
+    // Expiry status
+    if (result.expired) {
+      if (result.inGracePeriod) {
+        message += `⚠️ **Status:** Expired (in grace period)\n`;
+        message += `📅 **Expired on:** ${result.expirationDate?.toLocaleDateString()}\n`;
+        message += `⏰ **Grace period ends:** ${result.gracePeriodEnds?.toLocaleDateString()}\n`;
+        const daysUntilGraceEnd = Math.floor(
+          ((result.gracePeriodEnds?.getTime() || 0) - Date.now()) /
+            (1000 * 60 * 60 * 24)
+        );
+        message += `⌛ **Days until grace period ends:** ${daysUntilGraceEnd} days\n`;
+      } else {
+        message += `❌ **Status:** Expired (grace period ended)\n`;
+        message += `📅 **Expired on:** ${result.expirationDate?.toLocaleDateString()}\n`;
+      }
+    } else {
+      message += `✅ **Status:** Active\n`;
+      message += `📅 **Expires on:** ${result.expirationDate?.toLocaleDateString()}\n`;
+      message += `⌛ **Days remaining:** ${result.daysUntilExpiry} days\n`;
+
+      // Add warning if expiring soon
+      if (
+        result.daysUntilExpiry !== undefined &&
+        result.daysUntilExpiry <= 30
+      ) {
+        message += `\n⚠️ **Warning:** Domain expires in less than 30 days! Consider renewing soon.\n`;
+      }
+    }
+
+    // Owner information
+    if (result.registrant) {
+      message += `\n👤 **Registrant (NFT holder):** \`${result.registrant}\`\n`;
+    }
+    if (result.owner && result.owner !== result.registrant) {
+      message += `🔑 **Controller (ENS owner):** \`${result.owner}\`\n`;
+    }
+
+    await handler.sendMessage(channelId, message);
+  } catch (error) {
+    console.error("Error checking ENS expiry:", error);
+    await handler.sendMessage(
+      channelId,
+      "❌ An error occurred while checking domain expiry. Please try again later."
     );
   }
 });
