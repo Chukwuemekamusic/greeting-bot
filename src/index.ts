@@ -1,5 +1,6 @@
 import { makeTownsBot } from "@towns-protocol/bot";
 import commands from "./commands";
+import { checkAvailability } from "./services/ens";
 
 const bot = await makeTownsBot(
   process.env.APP_PRIVATE_DATA!,
@@ -14,7 +15,8 @@ bot.onSlashCommand("help", async (handler, { channelId }) => {
     channelId,
     "**Available Commands:**\n\n" +
       "• `/help` - Show this help message\n" +
-      "• `/time` - Get the current time\n\n" +
+      "• `/time` - Get the current time\n" +
+      "• `/check <domain>` - Check ENS domain availability\n\n" +
       "**Message Triggers:**\n\n" +
       "• Mention me - I'll respond\n" +
       "• React with 👋 - I'll wave back" +
@@ -27,6 +29,55 @@ bot.onSlashCommand("help", async (handler, { channelId }) => {
 bot.onSlashCommand("time", async (handler, { channelId }) => {
   const currentTime = new Date().toLocaleString();
   await handler.sendMessage(channelId, `Current time: ${currentTime} ⏰`);
+});
+
+bot.onSlashCommand("check", async (handler, { channelId, args }) => {
+  // Check if domain name was provided
+  if (!args || args.length === 0) {
+    await handler.sendMessage(
+      channelId,
+      "⚠️ Please provide a domain name to check.\n\nUsage: `/check <domain>`\nExample: `/check vitalik`"
+    );
+    return;
+  }
+
+  const domainName = args[0];
+
+  // Send a "checking..." message first
+  await handler.sendMessage(
+    channelId,
+    `Checking availability for **${domainName}.eth**...`
+  );
+
+  try {
+    const result = await checkAvailability(domainName);
+
+    if (!result.valid) {
+      await handler.sendMessage(
+        channelId,
+        `⚠️ Invalid domain: ${result.reason}`
+      );
+      return;
+    }
+
+    if (result.available) {
+      await handler.sendMessage(
+        channelId,
+        `✅ **${domainName}.eth** is available for registration!`
+      );
+    } else {
+      await handler.sendMessage(
+        channelId,
+        `❌ **${domainName}.eth** is already registered.`
+      );
+    }
+  } catch (error) {
+    console.error("Error checking ENS availability:", error);
+    await handler.sendMessage(
+      channelId,
+      "❌ An error occurred while checking domain availability. Please try again later."
+    );
+  }
 });
 
 bot.onMessage(async (handler, { message, channelId, eventId, createdAt }) => {
