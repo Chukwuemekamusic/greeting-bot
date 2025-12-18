@@ -236,7 +236,10 @@ export async function checkExpiry(
  */
 export async function resolveENSToAddress(
   domainName: string
-): Promise<{ success: true; address: string; fullName: string } | { success: false; reason: string }> {
+): Promise<
+  | { success: true; address: string; fullName: string }
+  | { success: false; reason: string }
+> {
   try {
     // Normalize and validate the domain name
     const { normalized, valid, reason } = normalizeENSName(domainName);
@@ -290,10 +293,7 @@ export async function resolveENSToAddress(
         })) as string;
 
         // Check if owner is zero address (not set)
-        if (
-          owner === "0x0000000000000000000000000000000000000000" ||
-          !owner
-        ) {
+        if (owner === "0x0000000000000000000000000000000000000000" || !owner) {
           return {
             success: false,
             reason: `${fullName} does not have an owner set`,
@@ -596,7 +596,9 @@ export async function getDomainHistory(
     if (jsonResponse.errors) {
       console.error("❌ GraphQL errors:", jsonResponse.errors);
       throw new Error(
-        `GraphQL errors: ${jsonResponse.errors.map((e: { message: string }) => e.message).join(", ")}`
+        `GraphQL errors: ${jsonResponse.errors
+          .map((e: { message: string }) => e.message)
+          .join(", ")}`
       );
     }
 
@@ -633,7 +635,9 @@ export async function getDomainHistory(
       for (const event of domain.registration.events) {
         if (event.__typename === "NameRegistered") {
           initialRegistrant = event.registrant.id;
-          registrationDate = new Date(parseInt(domain.registration.registrationDate) * 1000);
+          registrationDate = new Date(
+            parseInt(domain.registration.registrationDate) * 1000
+          );
           if (domain.registration.cost) {
             registrationCost = formatEther(BigInt(domain.registration.cost));
           }
@@ -671,7 +675,9 @@ export async function getDomainHistory(
         if (event.__typename === "Transfer") {
           // Skip if already counted in registration events
           const alreadyCounted = events.some(
-            (e) => e.transactionHash === event.transactionID && e.type === "transferred"
+            (e) =>
+              e.transactionHash === event.transactionID &&
+              e.type === "transferred"
           );
           if (!alreadyCounted) {
             totalTransfers++;
@@ -679,7 +685,10 @@ export async function getDomainHistory(
               type: "transferred",
               blockNumber: event.blockNumber,
               transactionHash: event.transactionID,
-              details: `Controller transferred to ${event.owner.id.slice(0, 8)}...`,
+              details: `Controller transferred to ${event.owner.id.slice(
+                0,
+                8
+              )}...`,
             });
           }
         } else if (event.__typename === "NewResolver") {

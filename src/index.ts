@@ -58,10 +58,7 @@ bot.onSlashCommand("check", async (handler, { channelId, args }) => {
 
   // Check validity before proceeding
   if (!valid) {
-    await handler.sendMessage(
-      channelId,
-      `⚠️ Invalid domain: ${reason}`
-    );
+    await handler.sendMessage(channelId, `⚠️ Invalid domain: ${reason}`);
     return;
   }
 
@@ -109,10 +106,7 @@ bot.onSlashCommand("expiry", async (handler, { channelId, args }) => {
 
   // Check validity before proceeding
   if (!valid) {
-    await handler.sendMessage(
-      channelId,
-      `⚠️ Invalid domain: ${reason}`
-    );
+    await handler.sendMessage(channelId, `⚠️ Invalid domain: ${reason}`);
     return;
   }
 
@@ -223,10 +217,13 @@ bot.onSlashCommand("history", async (handler, { channelId, args }) => {
     // Current state
     message += `**📊 Current State**\n`;
     if (result.currentRegistrant) {
-      message += `• Owner (NFT): \`${result.currentRegistrant.slice(0, 10)}...${result.currentRegistrant.slice(-8)}\`\n`;
+      message += `• Owner (NFT): \`${result.currentRegistrant}\n`;
     }
-    if (result.currentOwner && result.currentOwner !== result.currentRegistrant) {
-      message += `• Controller: \`${result.currentOwner.slice(0, 10)}...${result.currentOwner.slice(-8)}\`\n`;
+    if (
+      result.currentOwner &&
+      result.currentOwner !== result.currentRegistrant
+    ) {
+      message += `• Controller: \`${result.currentOwner}\n`;
     }
     if (result.expiryDate) {
       message += `• Expires: ${result.expiryDate.toLocaleDateString()}\n`;
@@ -237,10 +234,12 @@ bot.onSlashCommand("history", async (handler, { channelId, args }) => {
       message += `\n**📅 Registration Info**\n`;
       message += `• Registered: ${result.registrationDate.toLocaleDateString()}\n`;
       if (result.initialRegistrant) {
-        message += `• First Owner: \`${result.initialRegistrant.slice(0, 10)}...${result.initialRegistrant.slice(-8)}\`\n`;
+        message += `• First Owner: \`${result.initialRegistrant}\`\n`;
       }
       if (result.registrationCost) {
-        message += `• Cost: ${parseFloat(result.registrationCost).toFixed(4)} ETH\n`;
+        message += `• Cost: ${parseFloat(result.registrationCost).toFixed(
+          4
+        )} ETH\n`;
       }
     }
 
@@ -260,22 +259,25 @@ bot.onSlashCommand("history", async (handler, { channelId, args }) => {
     // Recent events (last 10)
     const recentEvents = result.events.slice(-10).reverse();
     if (recentEvents.length > 0) {
-      message += `\n**🕐 Recent Events** (last ${Math.min(10, result.events.length)})\n`;
+      message += `\n**🕐 Recent Events** (last ${Math.min(
+        10,
+        result.events.length
+      )})\n`;
       for (const event of recentEvents) {
         const emoji =
           event.type === "registered"
             ? "🆕"
             : event.type === "renewed"
-              ? "🔄"
-              : event.type === "transferred"
-                ? "↔️"
-                : event.type === "resolver_changed"
-                  ? "⚙️"
-                  : event.type === "wrapped"
-                    ? "📦"
-                    : event.type === "unwrapped"
-                      ? "📂"
-                      : "⏰";
+            ? "🔄"
+            : event.type === "transferred"
+            ? "↔️"
+            : event.type === "resolver_changed"
+            ? "⚙️"
+            : event.type === "wrapped"
+            ? "📦"
+            : event.type === "unwrapped"
+            ? "📂"
+            : "⏰";
 
         message += `\n${emoji} ${event.details}\n`;
         message += `   _Block: ${event.blockNumber} • [Tx](https://etherscan.io/tx/${event.transactionHash})_\n`;
@@ -348,9 +350,15 @@ bot.onSlashCommand(
         message = `**Your ENS Portfolio**\n\n`;
       } else if (displayName) {
         message = `**ENS Portfolio for ${displayName}**\n`;
-        message += `_Owner: \`${addressToCheck.slice(0, 6)}...${addressToCheck.slice(-4)}\`_\n\n`;
+        message += `_Owner: \`${addressToCheck.slice(
+          0,
+          6
+        )}...${addressToCheck.slice(-4)}\`_\n\n`;
       } else {
-        message = `**ENS Portfolio for \`${addressToCheck.slice(0, 6)}...${addressToCheck.slice(-4)}\`**\n\n`;
+        message = `**ENS Portfolio for \`${addressToCheck.slice(
+          0,
+          6
+        )}...${addressToCheck.slice(-4)}\`**\n\n`;
       }
 
       // No domains case
