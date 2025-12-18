@@ -5,6 +5,7 @@ import {
   checkExpiry,
   getUserPortfolio,
   resolveENSToAddress,
+  getDomainHistory,
 } from "./services/ens";
 import { normalizeENSName } from "./utils/ens";
 
@@ -24,6 +25,7 @@ bot.onSlashCommand("help", async (handler, { channelId }) => {
       "• `/time` - Get the current time\n" +
       "• `/check <domain>` - Check ENS domain availability\n" +
       "• `/expiry <domain>` - Check ENS domain expiration date\n" +
+      "• `/history <domain>` - View complete history of an ENS domain\n" +
       "• `/portfolio` - View your ENS domain portfolio\n" +
       "• `/portfolio <address>` - View portfolio for an address\n" +
       "• `/portfolio <domain>` - View portfolio for a domain owner\n\n" +
@@ -176,6 +178,120 @@ bot.onSlashCommand("expiry", async (handler, { channelId, args }) => {
     await handler.sendMessage(
       channelId,
       "❌ An error occurred while checking domain expiry. Please try again later."
+    );
+  }
+});
+
+bot.onSlashCommand("history", async (handler, { channelId, args }) => {
+  if (!args || args.length === 0) {
+    await handler.sendMessage(
+      channelId,
+      "⚠️ Please provide a domain name to check.\n\nUsage: `/history <domain>`\n\nExample: `/history vitalik`"
+    );
+    return;
+  }
+
+  // Normalize the domain name early
+  const { normalized, valid, reason } = normalizeENSName(args[0]);
+  const fullName = `${normalized}.eth`;
+
+  // Check validity before proceeding
+  if (!valid) {
+    await handler.sendMessage(channelId, `⚠️ Invalid domain: ${reason}`);
+    return;
+  }
+
+  await handler.sendMessage(
+    channelId,
+    `Fetching history for **${fullName}**...`
+  );
+
+  try {
+    const result = await getDomainHistory(normalized);
+
+    if (!result.registered) {
+      await handler.sendMessage(
+        channelId,
+        `ℹ️ **${fullName}** is not registered or not found in the subgraph.`
+      );
+      return;
+    }
+
+    // Build the history message
+    let message = `**${fullName}** Domain History\n\n`;
+
+    // Current state
+    message += `**📊 Current State**\n`;
+    if (result.currentRegistrant) {
+      message += `• Owner (NFT): \`${result.currentRegistrant.slice(0, 10)}...${result.currentRegistrant.slice(-8)}\`\n`;
+    }
+    if (result.currentOwner && result.currentOwner !== result.currentRegistrant) {
+      message += `• Controller: \`${result.currentOwner.slice(0, 10)}...${result.currentOwner.slice(-8)}\`\n`;
+    }
+    if (result.expiryDate) {
+      message += `• Expires: ${result.expiryDate.toLocaleDateString()}\n`;
+    }
+
+    // Registration info
+    if (result.registrationDate) {
+      message += `\n**📅 Registration Info**\n`;
+      message += `• Registered: ${result.registrationDate.toLocaleDateString()}\n`;
+      if (result.initialRegistrant) {
+        message += `• First Owner: \`${result.initialRegistrant.slice(0, 10)}...${result.initialRegistrant.slice(-8)}\`\n`;
+      }
+      if (result.registrationCost) {
+        message += `• Cost: ${parseFloat(result.registrationCost).toFixed(4)} ETH\n`;
+      }
+    }
+
+    // Stats
+    message += `\n**📈 Activity Summary**\n`;
+    message += `• Total Events: ${result.events.length}\n`;
+    if (result.totalTransfers > 0) {
+      message += `• Transfers: ${result.totalTransfers}\n`;
+    }
+    if (result.totalRenewals > 0) {
+      message += `• Renewals: ${result.totalRenewals}\n`;
+    }
+    if (result.totalResolverChanges > 0) {
+      message += `• Resolver Changes: ${result.totalResolverChanges}\n`;
+    }
+
+    // Recent events (last 10)
+    const recentEvents = result.events.slice(-10).reverse();
+    if (recentEvents.length > 0) {
+      message += `\n**🕐 Recent Events** (last ${Math.min(10, result.events.length)})\n`;
+      for (const event of recentEvents) {
+        const emoji =
+          event.type === "registered"
+            ? "🆕"
+            : event.type === "renewed"
+              ? "🔄"
+              : event.type === "transferred"
+                ? "↔️"
+                : event.type === "resolver_changed"
+                  ? "⚙️"
+                  : event.type === "wrapped"
+                    ? "📦"
+                    : event.type === "unwrapped"
+                      ? "📂"
+                      : "⏰";
+
+        message += `\n${emoji} ${event.details}\n`;
+        message += `   _Block: ${event.blockNumber} • [Tx](https://etherscan.io/tx/${event.transactionHash})_\n`;
+      }
+    }
+
+    if (result.events.length > 10) {
+      message += `\n_Showing last 10 of ${result.events.length} total events_`;
+    }
+
+    await handler.sendMessage(channelId, message);
+  } catch (error) {
+    console.error("Error fetching domain history:", error);
+    await handler.sendMessage(
+      channelId,
+      "❌ An error occurred while fetching domain history. Please try again later."
     );
   }
 });

@@ -20,6 +20,10 @@ const commands = [
         description: 'Check ENS domain expiration date',
     },
     {
+        name: 'history',
+        description: 'View complete history of an ENS domain',
+    },
+    {
         name: 'portfolio',
         description: 'View ENS domain portfolio',
     },

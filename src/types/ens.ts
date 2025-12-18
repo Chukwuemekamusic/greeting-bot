@@ -31,3 +31,46 @@ export interface ENSUserPortfolio {
   inGracePeriod: number;
   domains: ENSExpiryResult[];
 }
+
+// Domain History Types
+export interface ENSHistoryEvent {
+  type:
+    | "registered"
+    | "renewed"
+    | "transferred"
+    | "resolver_changed"
+    | "wrapped"
+    | "unwrapped"
+    | "expiry_extended";
+  blockNumber: number;
+  transactionHash: string;
+  timestamp?: Date;
+  details: string;
+}
+
+export interface ENSHistoryResult {
+  label: string;
+  fullName: string;
+  valid: boolean;
+  registered: boolean;
+  reason?: string;
+
+  // Current state
+  currentOwner?: string;
+  currentRegistrant?: string;
+  expiryDate?: Date;
+  createdAt?: Date;
+
+  // Registration info
+  registrationDate?: Date;
+  registrationCost?: string;
+  initialRegistrant?: string;
+
+  // Events history
+  events: ENSHistoryEvent[];
+
+  // Stats
+  totalTransfers: number;
+  totalRenewals: number;
+  totalResolverChanges: number;
+}
