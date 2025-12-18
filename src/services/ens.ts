@@ -241,11 +241,7 @@ export async function getUserPortfolio(
     const query = `
     query GetUserDomains($owner: String!) {
         account(id: $owner) {
-          domains(first: 1000, where: { parent: "0x93cdeb708b7545dc668eb9280176169d1c33cfd8ed6f04690a0bcc88a93fc4ae" }) {
-            name
-            labelName
-            createdAt
-          }
+          
           registrations(first: 1000) {
             domain {
               name
@@ -320,7 +316,8 @@ export async function getUserPortfolio(
     const expiredDomains = domains.filter((d) => d.expired).length;
     const inGracePeriodCount = domains.filter((d) => d.inGracePeriod).length;
     const expiringSoon = domains.filter(
-      (d) => !d.expired && d.daysUntilExpiry !== undefined && d.daysUntilExpiry <= 30
+      (d) =>
+        !d.expired && d.daysUntilExpiry !== undefined && d.daysUntilExpiry <= 30
     ).length;
 
     // Sort by expiry date (soonest first for active, then expired domains)
@@ -330,7 +327,9 @@ export async function getUserPortfolio(
       if (!a.expired && b.expired) return -1;
 
       // Within same status, sort by expiry date
-      return (a.expirationDate?.getTime() || 0) - (b.expirationDate?.getTime() || 0);
+      return (
+        (a.expirationDate?.getTime() || 0) - (b.expirationDate?.getTime() || 0)
+      );
     });
 
     return {
@@ -347,3 +346,9 @@ export async function getUserPortfolio(
     throw error;
   }
 }
+
+// domains(first: 1000, where: { parent: "0x93cdeb708b7545dc668eb9280176169d1c33cfd8ed6f04690a0bcc88a93fc4ae" }) {
+//             name
+//             labelName
+//             createdAt
+//           }

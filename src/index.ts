@@ -1,6 +1,10 @@
 import { makeTownsBot, getSmartAccountFromUserId } from "@towns-protocol/bot";
 import commands from "./commands";
-import { checkAvailability, checkExpiry, getUserPortfolio } from "./services/ens";
+import {
+  checkAvailability,
+  checkExpiry,
+  getUserPortfolio,
+} from "./services/ens";
 
 const bot = await makeTownsBot(
   process.env.APP_PRIVATE_DATA!,
@@ -84,7 +88,7 @@ bot.onSlashCommand("expiry", async (handler, { channelId, args }) => {
   if (!args || args.length === 0) {
     await handler.sendMessage(
       channelId,
-      "⚠️ Please provide a domain name to check.\n\nUsage: `/expiry <domain>`\nExample: `/expiry vitalik`"
+      "⚠️ Please provide a domain name to check.\n\nUsage: `/expiry <domain>`\n\nExample: `/expiry vitalik`"
     );
     return;
   }
@@ -164,102 +168,111 @@ bot.onSlashCommand("expiry", async (handler, { channelId, args }) => {
   }
 });
 
-bot.onSlashCommand("portfolio", async (handler, { channelId, args, userId }) => {
-  try {
-    // Determine which address to check
-    let addressToCheck: string;
-    let isOwnWallet = false;
+bot.onSlashCommand(
+  "portfolio",
+  async (handler, { channelId, args, userId }) => {
+    try {
+      // Determine which address to check
+      let addressToCheck: string;
+      let isOwnWallet = false;
 
-    if (!args || args.length === 0) {
-      // No argument provided - check user's own wallet
-      const userWallet = await getSmartAccountFromUserId(bot, { userId });
-      addressToCheck = userWallet as string;
-      isOwnWallet = true;
-      await handler.sendMessage(
-        channelId,
-        `Fetching your ENS portfolio...`
-      );
-    } else {
-      // Address provided as argument
-      addressToCheck = args[0];
-      // Basic validation
-      if (!addressToCheck.startsWith("0x") || addressToCheck.length !== 42) {
+      if (!args || args.length === 0) {
+        // No argument provided - check user's own wallet
+        const userWallet = await getSmartAccountFromUserId(bot, { userId });
+        addressToCheck = userWallet as string;
+        isOwnWallet = true;
+        await handler.sendMessage(channelId, `Fetching your ENS portfolio...`);
+      } else {
+        // Address provided as argument
+        addressToCheck = args[0];
+        // Basic validation
+        if (!addressToCheck.startsWith("0x") || addressToCheck.length !== 42) {
+          await handler.sendMessage(
+            channelId,
+            "⚠️ Invalid Ethereum address.\n\nUsage: `/portfolio` (for your own wallet) or `/portfolio <address>`"
+          );
+          return;
+        }
         await handler.sendMessage(
           channelId,
-          "⚠️ Invalid Ethereum address.\n\nUsage: `/portfolio` (for your own wallet) or `/portfolio <address>`"
+          `Fetching portfolio for \`${addressToCheck}\`...`
         );
+      }
+
+      const portfolio = await getUserPortfolio(addressToCheck);
+
+      // Build the portfolio message
+      let message = isOwnWallet
+        ? `**Your ENS Portfolio**\n\n`
+        : `**ENS Portfolio for \`${addressToCheck.slice(
+            0,
+            6
+          )}...${addressToCheck.slice(-4)}\`**\n\n`;
+
+      // No domains case
+      if (portfolio.totalDomains === 0) {
+        message += `ℹ️ No ENS domains found for this address.`;
+        await handler.sendMessage(channelId, message);
         return;
       }
+
+      // Summary stats
+      message += `**📊 Summary**\n`;
+      message += `• Total domains: ${portfolio.totalDomains}\n`;
+      message += `• Active: ${portfolio.activeDomains}\n`;
+      message += `• Expired: ${portfolio.expiredDomains}\n`;
+      if (portfolio.expiringSoon > 0) {
+        message += `• ⚠️ Expiring soon (<30 days): ${portfolio.expiringSoon}\n`;
+      }
+      if (portfolio.inGracePeriod > 0) {
+        message += `• In grace period: ${portfolio.inGracePeriod}\n`;
+      }
+
+      // List domains grouped by status
+      const activeDomains = portfolio.domains.filter((d) => !d.expired);
+      const expiredDomains = portfolio.domains.filter((d) => d.expired);
+
+      if (activeDomains.length > 0) {
+        message += `\n**✅ Active Domains (${activeDomains.length})**\n`;
+        activeDomains.slice(0, 10).forEach((d) => {
+          const daysLeft = d.daysUntilExpiry || 0;
+          const warningIcon = daysLeft <= 30 ? " ⚠️" : "";
+          message += `\n• **${
+            d.fullName
+          }** - expires ${d.expirationDate?.toLocaleDateString()} (${daysLeft} days)${warningIcon}\n`;
+        });
+        if (activeDomains.length > 10) {
+          message += `_... and ${activeDomains.length - 10} more_\n`;
+        }
+      }
+
+      if (expiredDomains.length > 0) {
+        message += `\n**❌ Expired Domains (${expiredDomains.length})**\n`;
+        expiredDomains.slice(0, 5).forEach((d) => {
+          const status = d.inGracePeriod
+            ? " (in grace period)"
+            : " (grace period ended)";
+          message += `• **${
+            d.fullName
+          }** - expired ${d.expirationDate?.toLocaleDateString()}${status}\n`;
+        });
+        if (expiredDomains.length > 5) {
+          message += `_... and ${expiredDomains.length - 5} more_\n`;
+        }
+      }
+
+      message += `\n_Use \`/expiry <domain>\` for detailed info on a specific domain._`;
+
+      await handler.sendMessage(channelId, message);
+    } catch (error) {
+      console.error("Error fetching portfolio:", error);
       await handler.sendMessage(
         channelId,
-        `Fetching portfolio for \`${addressToCheck}\`...`
+        "❌ An error occurred while fetching the portfolio. Please try again later."
       );
     }
-
-    const portfolio = await getUserPortfolio(addressToCheck);
-
-    // Build the portfolio message
-    let message = isOwnWallet
-      ? `**Your ENS Portfolio**\n\n`
-      : `**ENS Portfolio for \`${addressToCheck.slice(0, 6)}...${addressToCheck.slice(-4)}\`**\n\n`;
-
-    // No domains case
-    if (portfolio.totalDomains === 0) {
-      message += `ℹ️ No ENS domains found for this address.`;
-      await handler.sendMessage(channelId, message);
-      return;
-    }
-
-    // Summary stats
-    message += `**📊 Summary**\n`;
-    message += `• Total domains: ${portfolio.totalDomains}\n`;
-    message += `• Active: ${portfolio.activeDomains}\n`;
-    message += `• Expired: ${portfolio.expiredDomains}\n`;
-    if (portfolio.expiringSoon > 0) {
-      message += `• ⚠️ Expiring soon (<30 days): ${portfolio.expiringSoon}\n`;
-    }
-    if (portfolio.inGracePeriod > 0) {
-      message += `• In grace period: ${portfolio.inGracePeriod}\n`;
-    }
-
-    // List domains grouped by status
-    const activeDomains = portfolio.domains.filter((d) => !d.expired);
-    const expiredDomains = portfolio.domains.filter((d) => d.expired);
-
-    if (activeDomains.length > 0) {
-      message += `\n**✅ Active Domains (${activeDomains.length})**\n`;
-      activeDomains.slice(0, 10).forEach((d) => {
-        const daysLeft = d.daysUntilExpiry || 0;
-        const warningIcon = daysLeft <= 30 ? " ⚠️" : "";
-        message += `• **${d.fullName}** - expires ${d.expirationDate?.toLocaleDateString()} (${daysLeft} days)${warningIcon}\n`;
-      });
-      if (activeDomains.length > 10) {
-        message += `_... and ${activeDomains.length - 10} more_\n`;
-      }
-    }
-
-    if (expiredDomains.length > 0) {
-      message += `\n**❌ Expired Domains (${expiredDomains.length})**\n`;
-      expiredDomains.slice(0, 5).forEach((d) => {
-        const status = d.inGracePeriod ? " (in grace period)" : " (grace period ended)";
-        message += `• **${d.fullName}** - expired ${d.expirationDate?.toLocaleDateString()}${status}\n`;
-      });
-      if (expiredDomains.length > 5) {
-        message += `_... and ${expiredDomains.length - 5} more_\n`;
-      }
-    }
-
-    message += `\n_Use \`/expiry <domain>\` for detailed info on a specific domain._`;
-
-    await handler.sendMessage(channelId, message);
-  } catch (error) {
-    console.error("Error fetching portfolio:", error);
-    await handler.sendMessage(
-      channelId,
-      "❌ An error occurred while fetching the portfolio. Please try again later."
-    );
   }
-});
+);
 
 bot.onMessage(async (handler, { message, channelId, eventId, createdAt }) => {
   if (message.includes("hello")) {
