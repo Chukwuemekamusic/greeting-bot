@@ -7,6 +7,7 @@ import {
   CONTROLLER_ABI,
   BASE_REGISTRAR_ABI,
   ENS_REGISTRY_ABI,
+  ENS_SUBGRAPH,
 } from "../constants/ens";
 import { normalizeENSName, getTokenId, namehash } from "../utils/ens";
 import type {
@@ -345,7 +346,7 @@ export async function getUserPortfolio(
       }
     `;
 
-    const response = await fetch(ENS_CONTRACTS.SUBGRAPH_URL, {
+    const response = await fetch(ENS_SUBGRAPH.LEGACY, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -561,10 +562,10 @@ export async function getDomainHistory(
       }
     `;
 
-    console.log("🔍 Querying subgraph:", ENS_CONTRACTS.SUBGRAPH_URL);
+    console.log("🔍 Querying subgraph:", ENS_SUBGRAPH.LEGACY);
     console.log("🔍 Query variables:", { domainName: fullName });
 
-    const response = await fetch(ENS_CONTRACTS.SUBGRAPH_URL, {
+    const response = await fetch(ENS_SUBGRAPH.LEGACY, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

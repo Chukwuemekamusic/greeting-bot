@@ -8,6 +8,13 @@ export const ENS_CONTRACTS = {
     "https://api.thegraph.com/subgraphs/name/ensdomains/ens" as const,
 } as const;
 
+const SUBGRAPH_API_KEY = process.env.SUBGRAPH_API_KEY;
+
+export const ENS_SUBGRAPH = {
+  LEGACY: "https://api.thegraph.com/subgraphs/name/ensdomains/ens" as const,
+  KEY: `https://gateway-arbitrum.network.thegraph.com/api/${SUBGRAPH_API_KEY}/subgraphs/id/5XqPmWe6gjyrJtFn9cLy237i4cWw2j9HcUJEXsP5qGtH` as const,
+} as const;
+
 // Time Constants
 export const TIME = {
   SECONDS_PER_YEAR: 31557600n, // 365.25 days in seconds
