@@ -4,6 +4,7 @@ import {
   checkAvailability,
   checkExpiry,
   getUserPortfolio,
+  resolveENSToAddress,
 } from "./services/ens";
 
 const bot = await makeTownsBot(
@@ -22,7 +23,9 @@ bot.onSlashCommand("help", async (handler, { channelId }) => {
       "• `/time` - Get the current time\n" +
       "• `/check <domain>` - Check ENS domain availability\n" +
       "• `/expiry <domain>` - Check ENS domain expiration date\n" +
-      "• `/portfolio [address]` - View ENS domain portfolio (your wallet or specified address)\n\n" +
+      "• `/portfolio` - View your ENS domain portfolio\n" +
+      "• `/portfolio <address>` - View portfolio for an address\n" +
+      "• `/portfolio <domain>` - View portfolio for a domain owner\n\n" +
       "**Message Triggers:**\n\n" +
       "• Mention me - I'll respond\n" +
       "• React with 👋 - I'll wave back" +
@@ -175,39 +178,55 @@ bot.onSlashCommand(
       // Determine which address to check
       let addressToCheck: string;
       let isOwnWallet = false;
+      let displayName: string | undefined;
 
       if (!args || args.length === 0) {
-        // No argument provided - check user's own wallet
+        // Case 1: No argument - check user's own wallet
         const userWallet = await getSmartAccountFromUserId(bot, { userId });
         addressToCheck = userWallet as string;
         isOwnWallet = true;
         await handler.sendMessage(channelId, `Fetching your ENS portfolio...`);
-      } else {
-        // Address provided as argument
+      } else if (args[0].startsWith("0x") && args[0].length === 42) {
+        // Case 2: Ethereum address provided
         addressToCheck = args[0];
-        // Basic validation
-        if (!addressToCheck.startsWith("0x") || addressToCheck.length !== 42) {
-          await handler.sendMessage(
-            channelId,
-            "⚠️ Invalid Ethereum address.\n\nUsage: `/portfolio` (for your own wallet) or `/portfolio <address>`"
-          );
-          return;
-        }
         await handler.sendMessage(
           channelId,
           `Fetching portfolio for \`${addressToCheck}\`...`
         );
+      } else {
+        // Case 3: ENS domain name provided - resolve it first
+        const domainInput = args[0];
+        await handler.sendMessage(
+          channelId,
+          `Resolving **${domainInput}** and fetching portfolio...`
+        );
+
+        const resolution = await resolveENSToAddress(domainInput);
+
+        if (!resolution.success) {
+          await handler.sendMessage(
+            channelId,
+            `⚠️ ${resolution.reason}\n\nUsage: \`/portfolio\`, \`/portfolio <address>\`, or \`/portfolio <domain>\``
+          );
+          return;
+        }
+
+        addressToCheck = resolution.address;
+        displayName = resolution.fullName;
       }
 
       const portfolio = await getUserPortfolio(addressToCheck);
 
-      // Build the portfolio message
-      let message = isOwnWallet
-        ? `**Your ENS Portfolio**\n\n`
-        : `**ENS Portfolio for \`${addressToCheck.slice(
-            0,
-            6
-          )}...${addressToCheck.slice(-4)}\`**\n\n`;
+      // Build the portfolio message header
+      let message = "";
+      if (isOwnWallet) {
+        message = `**Your ENS Portfolio**\n\n`;
+      } else if (displayName) {
+        message = `**ENS Portfolio for ${displayName}**\n`;
+        message += `_Owner: \`${addressToCheck.slice(0, 6)}...${addressToCheck.slice(-4)}\`_\n\n`;
+      } else {
+        message = `**ENS Portfolio for \`${addressToCheck.slice(0, 6)}...${addressToCheck.slice(-4)}\`**\n\n`;
+      }
 
       // No domains case
       if (portfolio.totalDomains === 0) {

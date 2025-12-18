@@ -231,6 +231,97 @@ export async function checkExpiry(
 }
 
 /**
+ * Resolves an ENS domain name to its owner's Ethereum address
+ * Supports both .eth domains and subdomains
+ */
+export async function resolveENSToAddress(
+  domainName: string
+): Promise<{ success: true; address: string; fullName: string } | { success: false; reason: string }> {
+  try {
+    // Normalize and validate the domain name
+    const { normalized, valid, reason } = normalizeENSName(domainName);
+
+    if (!valid) {
+      return {
+        success: false,
+        reason: reason || "Invalid domain name",
+      };
+    }
+
+    const fullName = normalized.endsWith(".eth")
+      ? normalized
+      : `${normalized}.eth`;
+
+    // Check if it's a second-level .eth domain or a subdomain
+    const isSecondLevel = !normalized.includes(".");
+    const tokenId = getTokenId(normalized);
+
+    if (isSecondLevel) {
+      // For .eth domains, get the registrant (NFT owner) from BaseRegistrar
+      try {
+        const registrant = (await readContract(ethereumClient, {
+          address: ENS_CONTRACTS.BASE_REGISTRAR,
+          abi: BASE_REGISTRAR_ABI,
+          functionName: "ownerOf",
+          args: [tokenId],
+        })) as string;
+
+        return {
+          success: true,
+          address: registrant,
+          fullName,
+        };
+      } catch (error) {
+        // Domain not registered or expired beyond grace period
+        return {
+          success: false,
+          reason: `${fullName} is not registered or has expired`,
+        };
+      }
+    } else {
+      // For subdomains, get the owner from ENS Registry
+      try {
+        const nodeHash = namehash(fullName);
+        const owner = (await readContract(ethereumClient, {
+          address: ENS_CONTRACTS.ENS_REGISTRY,
+          abi: ENS_REGISTRY_ABI,
+          functionName: "owner",
+          args: [nodeHash],
+        })) as string;
+
+        // Check if owner is zero address (not set)
+        if (
+          owner === "0x0000000000000000000000000000000000000000" ||
+          !owner
+        ) {
+          return {
+            success: false,
+            reason: `${fullName} does not have an owner set`,
+          };
+        }
+
+        return {
+          success: true,
+          address: owner,
+          fullName,
+        };
+      } catch (error) {
+        return {
+          success: false,
+          reason: `Unable to resolve ${fullName}`,
+        };
+      }
+    }
+  } catch (error) {
+    console.error("Error resolving ENS:", error);
+    return {
+      success: false,
+      reason: "Error resolving ENS domain",
+    };
+  }
+}
+
+/**
  * Checks a user's ENS portfolio
  */
 export async function getUserPortfolio(
