@@ -6,6 +6,7 @@ import {
   getUserPortfolio,
   resolveENSToAddress,
 } from "./services/ens";
+import { normalizeENSName } from "./utils/ens";
 
 const bot = await makeTownsBot(
   process.env.APP_PRIVATE_DATA!,
@@ -49,25 +50,29 @@ bot.onSlashCommand("check", async (handler, { channelId, args }) => {
     return;
   }
 
-  const domainName = args[0];
+  // Normalize the domain name early
+  const { normalized, valid, reason } = normalizeENSName(args[0]);
+  const fullName = `${normalized}.eth`;
+
+  // Check validity before proceeding
+  if (!valid) {
+    await handler.sendMessage(
+      channelId,
+      `⚠️ Invalid domain: ${reason}`
+    );
+    return;
+  }
+
   await handler.sendMessage(
     channelId,
-    `Checking availability for **${domainName}.eth**...`
+    `Checking availability for **${fullName}**...`
   );
 
   try {
-    const result = await checkAvailability(domainName);
-
-    if (!result.valid) {
-      await handler.sendMessage(
-        channelId,
-        `⚠️ Invalid domain: ${result.reason}`
-      );
-      return;
-    }
+    const result = await checkAvailability(normalized);
 
     if (result.available) {
-      let message = `✅ **${domainName}.eth** is available for registration!`;
+      let message = `✅ **${fullName}** is available for registration!`;
       if (result.priceEth) {
         message += `\n💰 Price: ${result.priceEth} ETH/year`;
       }
@@ -75,7 +80,7 @@ bot.onSlashCommand("check", async (handler, { channelId, args }) => {
     } else {
       await handler.sendMessage(
         channelId,
-        `❌ **${domainName}.eth** is already registered.`
+        `❌ **${fullName}** is already registered.`
       );
     }
   } catch (error) {
@@ -96,33 +101,37 @@ bot.onSlashCommand("expiry", async (handler, { channelId, args }) => {
     return;
   }
 
-  const domainName = args[0];
+  // Normalize the domain name early
+  const { normalized, valid, reason } = normalizeENSName(args[0]);
+  const fullName = `${normalized}.eth`;
+
+  // Check validity before proceeding
+  if (!valid) {
+    await handler.sendMessage(
+      channelId,
+      `⚠️ Invalid domain: ${reason}`
+    );
+    return;
+  }
+
   await handler.sendMessage(
     channelId,
-    `Checking expiry for **${domainName}.eth**...`
+    `Checking expiry for **${fullName}**...`
   );
 
   try {
-    const result = await checkExpiry(domainName);
-
-    if (!result.valid) {
-      await handler.sendMessage(
-        channelId,
-        `⚠️ Invalid domain: ${result.reason}`
-      );
-      return;
-    }
+    const result = await checkExpiry(normalized);
 
     if (!result.registered) {
       await handler.sendMessage(
         channelId,
-        `ℹ️ **${domainName}.eth** is not registered.`
+        `ℹ️ **${fullName}** is not registered.`
       );
       return;
     }
 
     // Build the expiry message
-    let message = `**${domainName}.eth** Expiry Information\n\n`;
+    let message = `**${fullName}** Expiry Information\n\n`;
 
     // Expiry status
     if (result.expired) {
