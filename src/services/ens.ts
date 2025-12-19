@@ -2,12 +2,11 @@ import { createPublicClient, http, formatEther } from "viem";
 import { mainnet } from "viem/chains";
 import { readContract } from "viem/actions";
 import {
-  ENS_CONTRACTS,
+  ENS_CONFIG,
   TIME,
   CONTROLLER_ABI,
   BASE_REGISTRAR_ABI,
   ENS_REGISTRY_ABI,
-  ENS_SUBGRAPH,
 } from "../constants/ens";
 import { normalizeENSName, getTokenId, namehash } from "../utils/ens";
 import type {
@@ -50,7 +49,7 @@ export async function checkAvailability(
 
     // Check availability on the controller
     const isAvailable = await readContract(ethereumClient, {
-      address: ENS_CONTRACTS.REGISTRAR_CONTROLLER,
+      address: ENS_CONFIG.REGISTRAR_CONTROLLER,
       abi: CONTROLLER_ABI,
       functionName: "available",
       args: [normalized],
@@ -69,7 +68,7 @@ export async function checkAvailability(
     // Get the price for 1 year registration
     try {
       const priceData = (await readContract(ethereumClient, {
-        address: ENS_CONTRACTS.REGISTRAR_CONTROLLER,
+        address: ENS_CONFIG.REGISTRAR_CONTROLLER,
         abi: CONTROLLER_ABI,
         functionName: "rentPrice",
         args: [normalized, TIME.SECONDS_PER_YEAR],
@@ -138,7 +137,7 @@ export async function checkExpiry(
 
     try {
       expiryTimestamp = (await readContract(ethereumClient, {
-        address: ENS_CONTRACTS.BASE_REGISTRAR,
+        address: ENS_CONFIG.BASE_REGISTRAR,
         abi: BASE_REGISTRAR_ABI,
         functionName: "nameExpires",
         args: [tokenId],
@@ -158,7 +157,7 @@ export async function checkExpiry(
       // Get the registrant (NFT holder)
       try {
         registrant = (await readContract(ethereumClient, {
-          address: ENS_CONTRACTS.BASE_REGISTRAR,
+          address: ENS_CONFIG.BASE_REGISTRAR,
           abi: BASE_REGISTRAR_ABI,
           functionName: "ownerOf",
           args: [tokenId],
@@ -182,7 +181,7 @@ export async function checkExpiry(
     let owner: string | undefined;
     try {
       owner = (await readContract(ethereumClient, {
-        address: ENS_CONTRACTS.ENS_REGISTRY,
+        address: ENS_CONFIG.ENS_REGISTRY,
         abi: ENS_REGISTRY_ABI,
         functionName: "owner",
         args: [nodeHash],
@@ -264,7 +263,7 @@ export async function resolveENSToAddress(
       // For .eth domains, get the registrant (NFT owner) from BaseRegistrar
       try {
         const registrant = (await readContract(ethereumClient, {
-          address: ENS_CONTRACTS.BASE_REGISTRAR,
+          address: ENS_CONFIG.BASE_REGISTRAR,
           abi: BASE_REGISTRAR_ABI,
           functionName: "ownerOf",
           args: [tokenId],
@@ -287,7 +286,7 @@ export async function resolveENSToAddress(
       try {
         const nodeHash = namehash(fullName);
         const owner = (await readContract(ethereumClient, {
-          address: ENS_CONTRACTS.ENS_REGISTRY,
+          address: ENS_CONFIG.ENS_REGISTRY,
           abi: ENS_REGISTRY_ABI,
           functionName: "owner",
           args: [nodeHash],
@@ -346,7 +345,7 @@ export async function getUserPortfolio(
       }
     `;
 
-    const response = await fetch(ENS_SUBGRAPH.LEGACY, {
+    const response = await fetch(ENS_CONFIG.SUBGRAPH.LEGACY, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -562,10 +561,10 @@ export async function getDomainHistory(
       }
     `;
 
-    console.log("🔍 Querying subgraph:", ENS_SUBGRAPH.LEGACY);
+    console.log("🔍 Querying subgraph:", ENS_CONFIG.SUBGRAPH.LEGACY);
     console.log("🔍 Query variables:", { domainName: fullName });
 
-    const response = await fetch(ENS_SUBGRAPH.LEGACY, {
+    const response = await fetch(ENS_CONFIG.SUBGRAPH.LEGACY, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

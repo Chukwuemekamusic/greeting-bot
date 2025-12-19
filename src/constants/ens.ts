@@ -1,19 +1,16 @@
 // ENS Contract Addresses on Ethereum Mainnet
-export const ENS_CONTRACTS = {
+export const ENS_CONFIG = {
   REGISTRAR_CONTROLLER: "0x253553366Da8546fC250F225fe3d25d0C782303b" as const,
   BASE_REGISTRAR: "0x57f1887a8BF19b14fC0dF6Fd9B2acc9Af147eA85" as const,
   ENS_REGISTRY: "0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e" as const,
   // Mainnet ENS Subgraph endpoint (legacy endpoint - free, no API key required)
-  SUBGRAPH_URL:
-    "https://api.thegraph.com/subgraphs/name/ensdomains/ens" as const,
+  SUBGRAPH: {
+    LEGACY: "https://api.thegraph.com/subgraphs/name/ensdomains/ens" as const,
+    KEY: `https://gateway-arbitrum.network.thegraph.com/api/${process.env.SUBGRAPH_API_KEY}/subgraphs/id/5XqPmWe6gjyrJtFn9cLy237i4cWw2j9HcUJEXsP5qGtH` as const,
+  } as const,
 } as const;
 
-const SUBGRAPH_API_KEY = process.env.SUBGRAPH_API_KEY;
-
-export const ENS_SUBGRAPH = {
-  LEGACY: "https://api.thegraph.com/subgraphs/name/ensdomains/ens" as const,
-  KEY: `https://gateway-arbitrum.network.thegraph.com/api/${SUBGRAPH_API_KEY}/subgraphs/id/5XqPmWe6gjyrJtFn9cLy237i4cWw2j9HcUJEXsP5qGtH` as const,
-} as const;
+export const SUBGRAPH_API_KEY = process.env.SUBGRAPH_API_KEY;
 
 // Time Constants
 export const TIME = {
