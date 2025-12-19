@@ -361,10 +361,7 @@ bot.onSlashCommand("register", async (handler, { channelId, args, userId }) => {
     }
 
     // Calculate registration cost
-    const { totalEth } = await calculateRegistrationCost(
-      normalized,
-      yearsArg
-    );
+    const { totalEth } = await calculateRegistrationCost(normalized, yearsArg);
 
     // Get user's wallet address
     const userWallet = (await getSmartAccountFromUserId(bot, {
