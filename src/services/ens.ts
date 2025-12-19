@@ -7,12 +7,14 @@ import {
   CONTROLLER_ABI,
   BASE_REGISTRAR_ABI,
   ENS_REGISTRY_ABI,
+  REGISTRATION,
 } from "../constants/ens";
 import { normalizeENSName, getTokenId, namehash } from "../utils/ens";
 import type {
   ENSAvailabilityResult,
   ENSExpiryResult,
   ENSUserPortfolio,
+  RegistrationParams,
 } from "../types/ens";
 
 const MAINNET_RPC_URL = process.env.MAINNET_RPC_URL;
@@ -751,6 +753,103 @@ export async function getDomainHistory(
     };
   } catch (error) {
     console.error("Error fetching domain history:", error);
+    throw error;
+  }
+}
+
+/**
+ * Generates registration parameters for ENS domain registration
+ */
+export function generateRegistrationParams(
+  label: string,
+  owner: `0x${string}`,
+  durationYears: number = REGISTRATION.DEFAULT_DURATION_YEARS
+): RegistrationParams & { secret: `0x${string}` } {
+  // Generate a random secret for the commitment
+  const secret = `0x${Array.from({ length: 64 }, () =>
+    Math.floor(Math.random() * 16).toString(16)
+  ).join("")}` as `0x${string}`;
+
+  // Calculate duration in seconds
+  const duration = BigInt(durationYears) * TIME.SECONDS_PER_YEAR;
+
+  // Use zero address as resolver (will use default)
+  const resolver = "0x0000000000000000000000000000000000000000" as `0x${string}`;
+
+  // No additional data
+  const data: `0x${string}`[] = [];
+
+  // Set reverse record to true (user's address will resolve to this domain)
+  const reverseRecord = true;
+
+  // No owner-controlled fuses (standard registration)
+  const ownerControlledFuses = 0;
+
+  return {
+    label,
+    owner,
+    duration,
+    secret,
+    resolver,
+    data,
+    reverseRecord,
+    ownerControlledFuses,
+  };
+}
+
+/**
+ * Generates a commitment hash for ENS registration
+ */
+export async function makeCommitment(
+  params: RegistrationParams
+): Promise<`0x${string}`> {
+  try {
+    const commitment = (await readContract(ethereumClient, {
+      address: ENS_CONFIG.REGISTRAR_CONTROLLER,
+      abi: CONTROLLER_ABI,
+      functionName: "makeCommitment",
+      args: [
+        params.label,
+        params.owner,
+        params.duration,
+        params.secret,
+        params.resolver,
+        params.data,
+        params.reverseRecord,
+        params.ownerControlledFuses,
+      ],
+    })) as `0x${string}`;
+
+    return commitment;
+  } catch (error) {
+    console.error("Error making commitment:", error);
+    throw error;
+  }
+}
+
+/**
+ * Calculates the total cost for ENS registration (registration fee only, no gas)
+ */
+export async function calculateRegistrationCost(
+  label: string,
+  durationYears: number = REGISTRATION.DEFAULT_DURATION_YEARS
+): Promise<{ totalWei: bigint; totalEth: string }> {
+  try {
+    const duration = BigInt(durationYears) * TIME.SECONDS_PER_YEAR;
+
+    const priceData = (await readContract(ethereumClient, {
+      address: ENS_CONFIG.REGISTRAR_CONTROLLER,
+      abi: CONTROLLER_ABI,
+      functionName: "rentPrice",
+      args: [label, duration],
+    })) as { base: bigint; premium: bigint };
+
+    const totalWei = priceData.base + priceData.premium;
+    const totalEth = formatEther(totalWei);
+
+    return { totalWei, totalEth };
+  } catch (error) {
+    console.error("Error calculating registration cost:", error);
     throw error;
   }
 }

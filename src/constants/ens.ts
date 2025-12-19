@@ -20,6 +20,14 @@ export const TIME = {
   GRACE_PERIOD_SECONDS: 90 * 24 * 60 * 60, // 90 days in seconds
 } as const;
 
+// Registration Constants
+export const REGISTRATION = {
+  MIN_COMMITMENT_AGE: 60, // Minimum 60 seconds between commit and register
+  MAX_COMMITMENT_AGE: 86400, // Maximum 24 hours between commit and register
+  DEFAULT_DURATION_YEARS: 1, // Default registration duration
+  CHAIN_ID: "1", // Ethereum Mainnet
+} as const;
+
 // Validation Constants
 export const ENS_VALIDATION = {
   MIN_LENGTH: 3,
@@ -53,6 +61,45 @@ export const CONTROLLER_ABI = [
         ],
       },
     ],
+  },
+  {
+    name: "makeCommitment",
+    type: "function",
+    stateMutability: "pure",
+    inputs: [
+      { name: "name", type: "string" },
+      { name: "owner", type: "address" },
+      { name: "duration", type: "uint256" },
+      { name: "secret", type: "bytes32" },
+      { name: "resolver", type: "address" },
+      { name: "data", type: "bytes[]" },
+      { name: "reverseRecord", type: "bool" },
+      { name: "ownerControlledFuses", type: "uint16" },
+    ],
+    outputs: [{ type: "bytes32" }],
+  },
+  {
+    name: "commit",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [{ name: "commitment", type: "bytes32" }],
+    outputs: [],
+  },
+  {
+    name: "register",
+    type: "function",
+    stateMutability: "payable",
+    inputs: [
+      { name: "name", type: "string" },
+      { name: "owner", type: "address" },
+      { name: "duration", type: "uint256" },
+      { name: "secret", type: "bytes32" },
+      { name: "resolver", type: "address" },
+      { name: "data", type: "bytes[]" },
+      { name: "reverseRecord", type: "bool" },
+      { name: "ownerControlledFuses", type: "uint16" },
+    ],
+    outputs: [],
   },
 ] as const;
 

@@ -74,3 +74,28 @@ export interface ENSHistoryResult {
   totalRenewals: number;
   totalResolverChanges: number;
 }
+
+// Registration Types
+export interface CommitmentState {
+  userId: string;
+  channelId: string;
+  domain: string;
+  label: string;
+  commitment: `0x${string}`;
+  secret: `0x${string}`;
+  owner: `0x${string}`;
+  duration: bigint;
+  timestamp: number;
+  commitTxHash?: string;
+}
+
+export interface RegistrationParams {
+  label: string;
+  owner: `0x${string}`;
+  duration: bigint;
+  secret: `0x${string}`;
+  resolver: `0x${string}`;
+  data: `0x${string}`[];
+  reverseRecord: boolean;
+  ownerControlledFuses: number;
+}

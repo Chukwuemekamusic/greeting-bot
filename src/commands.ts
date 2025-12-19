@@ -27,6 +27,10 @@ const commands = [
         name: 'portfolio',
         description: 'View ENS domain portfolio',
     },
+    {
+        name: 'register',
+        description: 'Register an ENS domain (you pay gas)',
+    },
 ] as const satisfies BotCommand[]
 
 export default commands
