@@ -13,6 +13,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@across-protocol/app-sdk": "^0.4.4",
     "@connectrpc/connect-node": "^2.1.0",
     "@towns-protocol/bot": "^0.0.438",
     "@towns-protocol/proto": "^0.0.438",

@@ -1,5 +1,5 @@
 import { makeTownsBot, getSmartAccountFromUserId } from "@towns-protocol/bot";
-import { hexToBytes } from "viem";
+import { hexToBytes, formatEther } from "viem";
 import { encodeFunctionData } from "viem";
 import commands from "./commands";
 import {
@@ -12,12 +12,25 @@ import {
   makeCommitment,
   calculateRegistrationCost,
 } from "./services/ens";
+import {
+  checkBalance,
+  getBridgeQuote,
+  prepareBridgeTransaction,
+  pollBridgeStatus,
+  calculateRequiredMainnetETH,
+  extractDepositId,
+} from "./services/bridge";
 import { normalizeENSName } from "./utils/ens";
 import { ENS_CONFIG, CONTROLLER_ABI, REGISTRATION } from "./constants/ens";
+import { CHAIN_IDS, BRIDGE_CONFIG } from "./constants/bridge";
 import type { CommitmentState } from "./types/ens";
+import type { BridgeState } from "./types/bridge";
 
 // In-memory store for pending commitments
 const pendingCommitments = new Map<string, CommitmentState>();
+
+// In-memory store for pending bridge operations
+const pendingBridges = new Map<string, BridgeState>();
 
 const bot = await makeTownsBot(
   process.env.APP_PRIVATE_DATA!,
@@ -361,16 +374,124 @@ bot.onSlashCommand("register", async (handler, { channelId, args, userId }) => {
     }
 
     // Calculate registration cost
-    const { totalEth } = await calculateRegistrationCost(
-      normalized,
-      yearsArg
-    );
+    const { totalWei, totalEth } = await calculateRegistrationCost(normalized, yearsArg);
 
     // Get user's wallet address
     const userWallet = (await getSmartAccountFromUserId(bot, {
       userId,
     })) as `0x${string}`;
 
+    // Calculate total ETH needed on Mainnet (registration + gas + buffer)
+    const requiredMainnetETH = calculateRequiredMainnetETH(totalWei);
+
+    // Check user's balance on Mainnet
+    await handler.sendMessage(channelId, `Checking your Mainnet balance...`);
+
+    const mainnetBalance = await checkBalance(userWallet, CHAIN_IDS.MAINNET, requiredMainnetETH);
+
+    if (!mainnetBalance.sufficient) {
+      // User doesn't have enough on Mainnet, check Base balance
+      await handler.sendMessage(channelId, `Checking your Base balance...`);
+
+      const baseBalance = await checkBalance(userWallet, CHAIN_IDS.BASE);
+
+      if (baseBalance.balance < requiredMainnetETH) {
+        // User doesn't have enough on Base either
+        await handler.sendMessage(
+          channelId,
+          `❌ **Insufficient funds**\n\n` +
+            `You need ${formatEther(requiredMainnetETH)} ETH on Ethereum Mainnet to register ${fullName}.\n\n` +
+            `**Your balances:**\n` +
+            `• Mainnet: ${mainnetBalance.balanceEth} ETH\n` +
+            `• Base: ${baseBalance.balanceEth} ETH\n\n` +
+            `You need ${formatEther(mainnetBalance.shortfall!)} more ETH.`
+        );
+        return;
+      }
+
+      // User has enough on Base, offer to bridge
+      await handler.sendMessage(
+        channelId,
+        `💡 **Bridge Required**\n\n` +
+          `You need ${formatEther(requiredMainnetETH)} ETH on Mainnet.\n` +
+          `You have ${baseBalance.balanceEth} ETH on Base.\n\n` +
+          `⚠️ **Note:** Bridging takes ~${BRIDGE_CONFIG.ESTIMATED_BRIDGE_TIME_SECONDS} seconds. ` +
+          `The domain might be taken if it's popular.\n\n` +
+          `Preparing bridge transaction...`
+      );
+
+      // Get bridge quote
+      const bridgeQuote = await getBridgeQuote(requiredMainnetETH, CHAIN_IDS.BASE, CHAIN_IDS.MAINNET);
+
+      if (bridgeQuote.isAmountTooLow) {
+        await handler.sendMessage(
+          channelId,
+          `❌ Amount too low for bridge. Minimum: ${formatEther(BigInt(bridgeQuote.limits.minDeposit))} ETH`
+        );
+        return;
+      }
+
+      // Prepare bridge transaction
+      const bridgeData = prepareBridgeTransaction(
+        requiredMainnetETH,
+        userWallet,
+        totalWei,
+        CHAIN_IDS.BASE,
+        CHAIN_IDS.MAINNET
+      );
+
+      // Create bridge ID
+      const bridgeId = `bridge-${channelId}-${userId}-${normalized}`;
+
+      // Store bridge state
+      pendingBridges.set(bridgeId, {
+        userId,
+        channelId,
+        domain: fullName,
+        label: normalized,
+        years: yearsArg,
+        fromChain: CHAIN_IDS.BASE,
+        toChain: CHAIN_IDS.MAINNET,
+        amount: requiredMainnetETH,
+        recipient: userWallet,
+        timestamp: Date.now(),
+        status: "pending",
+      });
+
+      // Send bridge transaction request
+      await handler.sendInteractionRequest(
+        channelId,
+        {
+          case: "transaction",
+          value: {
+            id: bridgeId,
+            title: `Bridge ${formatEther(requiredMainnetETH)} ETH to Mainnet`,
+            content: {
+              case: "evm",
+              value: {
+                chainId: CHAIN_IDS.BASE.toString(),
+                to: bridgeData.to,
+                value: bridgeData.value,
+                data: bridgeData.data,
+                signerWallet: undefined,
+              },
+            },
+          },
+        },
+        hexToBytes(userId as `0x${string}`)
+      );
+
+      await handler.sendMessage(
+        channelId,
+        `📤 **Bridge transaction sent!**\n\n` +
+          `Please approve the bridge transaction in your wallet.\n` +
+          `Once confirmed, I'll automatically proceed with ENS registration.`
+      );
+
+      return;
+    }
+
+    // User has enough on Mainnet, proceed directly with ENS registration
     // Generate registration parameters
     const params = generateRegistrationParams(normalized, userWallet, yearsArg);
 
@@ -589,8 +710,172 @@ bot.onInteractionResponse(async (handler, event) => {
   const txResponse = response.payload.content.value;
   const requestId = txResponse.requestId;
 
+  // Check if this is a bridge transaction
+  if (requestId.startsWith("bridge-")) {
+    const bridgeState = pendingBridges.get(requestId);
+
+    if (!bridgeState) {
+      console.error(`No bridge state found for ID: ${requestId}`);
+      return;
+    }
+
+    // Check if the transaction was successful
+    if (txResponse.txHash) {
+      // Store the transaction hash
+      bridgeState.depositTxHash = txResponse.txHash;
+      bridgeState.status = "bridging";
+      pendingBridges.set(requestId, bridgeState);
+
+      await handler.sendMessage(
+        channelId,
+        `✅ **Bridge transaction confirmed!**\n\n` +
+          `Transaction: [View on BaseScan](https://basescan.org/tx/${txResponse.txHash})\n\n` +
+          `⏳ **Bridging to Mainnet...**\n` +
+          `This usually takes ~60 seconds. I'll notify you when complete.`
+      );
+
+      // Poll for bridge completion
+      const depositId = await extractDepositId(txResponse.txHash as `0x${string}`, CHAIN_IDS.BASE);
+
+      if (!depositId) {
+        await handler.sendMessage(
+          channelId,
+          `⚠️ Unable to extract deposit ID. Please check the bridge status manually at https://across.to`
+        );
+        pendingBridges.delete(requestId);
+        return;
+      }
+
+      bridgeState.depositId = depositId;
+      pendingBridges.set(requestId, bridgeState);
+
+      // Start polling for bridge status
+      pollBridgeStatus(depositId, CHAIN_IDS.BASE, async (status) => {
+        if (status.status === "filled") {
+          // Bridge completed successfully!
+          bridgeState.fillTxHash = status.fillTx;
+          bridgeState.status = "completed";
+          pendingBridges.set(requestId, bridgeState);
+
+          await handler.sendMessage(
+            channelId,
+            `🎉 **Bridge complete!**\n\n` +
+              `Fill Transaction: [View on Etherscan](https://etherscan.io/tx/${status.fillTx})\n\n` +
+              `✅ You now have ETH on Mainnet!\n` +
+              `Starting ENS registration for **${bridgeState.domain}**...`
+          );
+
+          // Now proceed with ENS registration
+          // Check availability again (domain might have been taken)
+          try {
+            const availability = await checkAvailability(bridgeState.label);
+
+            if (!availability.available) {
+              await handler.sendMessage(
+                channelId,
+                `❌ Sorry, **${bridgeState.domain}** was registered by someone else during the bridge.\n\n` +
+                  `Your ETH is now on Mainnet and ready to register a different domain.`
+              );
+              pendingBridges.delete(requestId);
+              return;
+            }
+
+            // Get user's wallet address
+            const userWallet = bridgeState.recipient;
+
+            // Generate registration parameters
+            const params = generateRegistrationParams(bridgeState.label, userWallet, bridgeState.years);
+
+            // Generate commitment hash
+            const commitmentHash = await makeCommitment(params);
+
+            // Create commitment ID
+            const commitmentId = `commit-${channelId}-${userId}-${bridgeState.label}`;
+
+            // Store commitment state
+            pendingCommitments.set(commitmentId, {
+              userId,
+              channelId,
+              domain: bridgeState.domain,
+              label: bridgeState.label,
+              commitment: commitmentHash,
+              secret: params.secret,
+              owner: userWallet,
+              duration: params.duration,
+              timestamp: Date.now(),
+            });
+
+            await handler.sendMessage(
+              channelId,
+              `🔐 **Step 1/2: Submitting commitment transaction...**`
+            );
+
+            // Prepare commit transaction data
+            const commitData = encodeFunctionData({
+              abi: CONTROLLER_ABI,
+              functionName: "commit",
+              args: [commitmentHash],
+            });
+
+            // Send commit transaction interaction request
+            await handler.sendInteractionRequest(
+              channelId,
+              {
+                case: "transaction",
+                value: {
+                  id: commitmentId,
+                  title: `Commit ENS Registration: ${bridgeState.domain}`,
+                  content: {
+                    case: "evm",
+                    value: {
+                      chainId: REGISTRATION.CHAIN_ID,
+                      to: ENS_CONFIG.REGISTRAR_CONTROLLER,
+                      value: "0",
+                      data: commitData,
+                      signerWallet: undefined,
+                    },
+                  },
+                },
+              },
+              hexToBytes(userId as `0x${string}`)
+            );
+
+            // Clean up bridge state
+            pendingBridges.delete(requestId);
+          } catch (error) {
+            console.error("Error initiating ENS registration after bridge:", error);
+            await handler.sendMessage(
+              channelId,
+              `❌ An error occurred while starting ENS registration. You can try again with \`/register ${bridgeState.label}\``
+            );
+            pendingBridges.delete(requestId);
+          }
+        } else if (status.status === "expired") {
+          // Bridge failed or expired
+          bridgeState.status = "failed";
+          pendingBridges.set(requestId, bridgeState);
+
+          await handler.sendMessage(
+            channelId,
+            `❌ **Bridge failed or expired**\n\n` +
+              `Please try again or check the status at https://across.to`
+          );
+
+          pendingBridges.delete(requestId);
+        }
+        // If still pending after timeout, status check will handle it
+      });
+    } else {
+      // Transaction was rejected or failed
+      await handler.sendMessage(
+        channelId,
+        `❌ Bridge transaction was not confirmed. Registration cancelled.`
+      );
+      pendingBridges.delete(requestId);
+    }
+  }
   // Check if this is a commit transaction
-  if (requestId.startsWith("commit-")) {
+  else if (requestId.startsWith("commit-")) {
     const commitment = pendingCommitments.get(requestId);
 
     if (!commitment) {
