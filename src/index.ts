@@ -1,5 +1,5 @@
 import { makeTownsBot, getSmartAccountFromUserId } from "@towns-protocol/bot";
-import { hexToBytes, formatEther } from "viem";
+import { hexToBytes, formatEther, parseEther } from "viem";
 import { encodeFunctionData } from "viem";
 import commands from "./commands";
 import {
@@ -21,7 +21,7 @@ import {
   extractDepositId,
 } from "./services/bridge";
 import { normalizeENSName } from "./utils/ens";
-import { ENS_CONFIG, CONTROLLER_ABI, REGISTRATION } from "./constants/ens";
+import { ENS_CONFIG, CONTROLLER_ABI, REGISTRATION, ENS_VALIDATION } from "./constants/ens";
 import { CHAIN_IDS, BRIDGE_CONFIG } from "./constants/bridge";
 import type { CommitmentState } from "./types/ens";
 import type { BridgeState } from "./types/bridge";
@@ -354,6 +354,17 @@ bot.onSlashCommand("register", async (handler, { channelId, args, userId }) => {
     return;
   }
 
+  // Check minimum length requirement
+  if (normalized.length < ENS_VALIDATION.MIN_LENGTH) {
+    await handler.sendMessage(
+      channelId,
+      `⚠️ **Domain too short**\n\n` +
+        `ENS domains must be at least ${ENS_VALIDATION.MIN_LENGTH} characters long.\n` +
+        `**${normalized}** is only ${normalized.length} character${normalized.length === 1 ? '' : 's'}.`
+    );
+    return;
+  }
+
   await handler.sendMessage(
     channelId,
     `Checking availability for **${fullName}**...`
@@ -395,32 +406,8 @@ bot.onSlashCommand("register", async (handler, { channelId, args, userId }) => {
 
       const baseBalance = await checkBalance(userWallet, CHAIN_IDS.BASE);
 
-      if (baseBalance.balance < requiredMainnetETH) {
-        // User doesn't have enough on Base either
-        await handler.sendMessage(
-          channelId,
-          `❌ **Insufficient funds**\n\n` +
-            `You need ${formatEther(requiredMainnetETH)} ETH on Ethereum Mainnet to register ${fullName}.\n\n` +
-            `**Your balances:**\n` +
-            `• Mainnet: ${mainnetBalance.balanceEth} ETH\n` +
-            `• Base: ${baseBalance.balanceEth} ETH\n\n` +
-            `You need ${formatEther(mainnetBalance.shortfall!)} more ETH.`
-        );
-        return;
-      }
-
-      // User has enough on Base, offer to bridge
-      await handler.sendMessage(
-        channelId,
-        `💡 **Bridge Required**\n\n` +
-          `You need ${formatEther(requiredMainnetETH)} ETH on Mainnet.\n` +
-          `You have ${baseBalance.balanceEth} ETH on Base.\n\n` +
-          `⚠️ **Note:** Bridging takes ~${BRIDGE_CONFIG.ESTIMATED_BRIDGE_TIME_SECONDS} seconds. ` +
-          `The domain might be taken if it's popular.\n\n` +
-          `Preparing bridge transaction...`
-      );
-
-      // Get bridge quote
+      // Get bridge quote first to calculate total needed including fees
+      await handler.sendMessage(channelId, `Getting bridge quote...`);
       const bridgeQuote = await getBridgeQuote(requiredMainnetETH, CHAIN_IDS.BASE, CHAIN_IDS.MAINNET);
 
       if (bridgeQuote.isAmountTooLow) {
@@ -431,11 +418,72 @@ bot.onSlashCommand("register", async (handler, { channelId, args, userId }) => {
         return;
       }
 
-      // Prepare bridge transaction
+      // Calculate output amount after bridge fees
+      const bridgeFeeWei = BigInt(bridgeQuote.totalRelayFee.total);
+      const outputAmount = requiredMainnetETH > bridgeFeeWei
+        ? requiredMainnetETH - bridgeFeeWei
+        : 0n;
+
+      // Validate that output amount covers registration cost
+      if (outputAmount < totalWei) {
+        await handler.sendMessage(
+          channelId,
+          `❌ **Bridge fees too high**\n\n` +
+            `After bridge fees of ${formatEther(bridgeFeeWei)} ETH, ` +
+            `you would only receive ${formatEther(outputAmount)} ETH on Mainnet.\n\n` +
+            `This is not enough to cover the registration cost of ${totalEth} ETH.\n\n` +
+            `Please fund your Mainnet wallet directly or wait for lower fees.`
+        );
+        return;
+      }
+
+      // Estimate gas needed on Base for bridge transaction (rough estimate)
+      const baseGasEstimate = parseEther("0.0005");
+      const totalNeededOnBase = requiredMainnetETH + bridgeFeeWei + baseGasEstimate;
+
+      if (baseBalance.balance < totalNeededOnBase) {
+        // User doesn't have enough on Base to cover bridge + fees + gas
+        const shortfall = totalNeededOnBase - baseBalance.balance;
+        await handler.sendMessage(
+          channelId,
+          `❌ **Insufficient funds**\n\n` +
+            `You need ${formatEther(requiredMainnetETH)} ETH on Ethereum Mainnet to register ${fullName}.\n\n` +
+            `**To bridge from Base, you need:**\n` +
+            `• Bridge amount: ${formatEther(requiredMainnetETH)} ETH\n` +
+            `• Bridge fee: ${formatEther(bridgeFeeWei)} ETH (${bridgeQuote.totalRelayFee.pct}%)\n` +
+            `• Gas on Base: ~${formatEther(baseGasEstimate)} ETH\n` +
+            `• **Total needed on Base:** ${formatEther(totalNeededOnBase)} ETH\n\n` +
+            `**Your balances:**\n` +
+            `• Mainnet: ${mainnetBalance.balanceEth} ETH\n` +
+            `• Base: ${baseBalance.balanceEth} ETH\n\n` +
+            `You need ${formatEther(shortfall)} more ETH on Base to complete the bridge.`
+        );
+        return;
+      }
+
+      // User has enough on Base, show bridge details
+      await handler.sendMessage(
+        channelId,
+        `💡 **Bridge Required**\n\n` +
+          `**Registration Details:**\n` +
+          `• Domain: ${fullName}\n` +
+          `• Registration cost: ${totalEth} ETH\n` +
+          `• Total needed (incl. gas): ${formatEther(requiredMainnetETH)} ETH\n\n` +
+          `**Bridge Details:**\n` +
+          `• From: Base (${baseBalance.balanceEth} ETH available)\n` +
+          `• To: Ethereum Mainnet\n` +
+          `• Bridge fee: ~${formatEther(bridgeFeeWei)} ETH (${bridgeQuote.totalRelayFee.pct}%)\n` +
+          `• You'll receive: ~${formatEther(outputAmount)} ETH on Mainnet\n` +
+          `• Estimated time: ~${bridgeQuote.estimatedFillTimeSec} seconds\n\n` +
+          `⚠️ **Note:** The domain might be taken during bridging if it's popular.\n\n` +
+          `Preparing bridge transaction...`
+      );
+
+      // Prepare bridge transaction with correct outputAmount
       const bridgeData = prepareBridgeTransaction(
         requiredMainnetETH,
         userWallet,
-        totalWei,
+        outputAmount,
         CHAIN_IDS.BASE,
         CHAIN_IDS.MAINNET
       );
@@ -900,6 +948,20 @@ bot.onInteractionResponse(async (handler, event) => {
       // Wait 60 seconds, then send the register transaction request
       setTimeout(async () => {
         try {
+          // Re-check availability after 60-second wait (domain could have been registered)
+          const availability = await checkAvailability(commitment.label);
+
+          if (!availability.available) {
+            await handler.sendMessage(
+              channelId,
+              `❌ **Domain no longer available**\n\n` +
+                `Someone registered **${commitment.domain}** during the 60-second waiting period.\n\n` +
+                `Your commitment is still valid for 24 hours if you want to try registering a different domain.`
+            );
+            pendingCommitments.delete(requestId);
+            return;
+          }
+
           // Recalculate cost to ensure it hasn't changed
           const { totalWei, totalEth } = await calculateRegistrationCost(
             commitment.label,
