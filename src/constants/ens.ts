@@ -3,6 +3,7 @@ export const ENS_CONFIG = {
   REGISTRAR_CONTROLLER: "0x253553366Da8546fC250F225fe3d25d0C782303b" as const,
   BASE_REGISTRAR: "0x57f1887a8BF19b14fC0dF6Fd9B2acc9Af147eA85" as const,
   ENS_REGISTRY: "0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e" as const,
+  PUBLIC_RESOLVER: "0x231b0Ee14048e9dCcD1d247744d114a4EB5E8E63" as const,
   // Mainnet ENS Subgraph endpoint (legacy endpoint - free, no API key required)
   SUBGRAPH: {
     LEGACY: "https://api.thegraph.com/subgraphs/name/ensdomains/ens" as const,
@@ -14,9 +15,7 @@ export const SEPOLIA_ENS_CONFIG = {
   REGISTRAR_CONTROLLER: "0xFED6a969AaA60E4961FCD3EBF1A2e8913ac65B72" as const,
   BASE_REGISTRAR: "0x57f1887a8BF19b14fC0dF6Fd9B2acc9Af147eA85" as const,
   ENS_REGISTRY: "0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e" as const,
-  // Resolver
   PUBLIC_RESOLVER: "0x8FADE66B79cC9f707aB26799354482EB93a5B7dD" as const,
-  // Reverse Registrar
   REVERSE_REGISTRAR: "0xA0a1AbcDAe1a2a4A2B6F8638e4f1b4D0d5F5e7E8" as const,
 
   SUBGRAPH: {
@@ -26,6 +25,7 @@ export const SEPOLIA_ENS_CONFIG = {
 };
 
 export const SUBGRAPH_API_KEY = process.env.SUBGRAPH_API_KEY;
+export const SEPOLIA_RPC_URL = process.env.SEPOLIA_RPC_URL;
 
 // Time Constants
 export const TIME = {

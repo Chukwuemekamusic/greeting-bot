@@ -31,6 +31,10 @@ const commands = [
         name: 'register',
         description: 'Register an ENS domain (you pay gas)',
     },
+    {
+        name: 'testregister',
+        description: 'Test ENS registration on Sepolia testnet',
+    },
 ] as const satisfies BotCommand[]
 
 export default commands

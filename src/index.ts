@@ -12,8 +12,19 @@ import {
   makeCommitment,
   calculateRegistrationCost,
 } from "./services/ens";
+import {
+  checkAvailabilitySepolia,
+  generateRegistrationParamsSepolia,
+  makeCommitmentSepolia,
+  calculateRegistrationCostSepolia,
+} from "./services/ens-sepolia";
 import { normalizeENSName } from "./utils/ens";
-import { ENS_CONFIG, CONTROLLER_ABI, REGISTRATION } from "./constants/ens";
+import {
+  ENS_CONFIG,
+  SEPOLIA_ENS_CONFIG,
+  CONTROLLER_ABI,
+  REGISTRATION,
+} from "./constants/ens";
 import type { CommitmentState } from "./types/ens";
 
 // In-memory store for pending commitments
@@ -39,7 +50,8 @@ bot.onSlashCommand("help", async (handler, { channelId }) => {
       "• `/portfolio` - View your ENS domain portfolio\n" +
       "• `/portfolio <address>` - View portfolio for an address\n" +
       "• `/portfolio <domain>` - View portfolio for a domain owner\n" +
-      "• `/register <domain> [years]` - Register an ENS domain (you pay gas)\n\n" +
+      "• `/register <domain> [years]` - Register an ENS domain on mainnet (you pay gas)\n" +
+      "• `/testregister <domain> [years]` - Test ENS registration on Sepolia testnet 🧪\n\n" +
       "**Message Triggers:**\n\n" +
       "• Mention me - I'll respond\n" +
       "• React with 👋 - I'll wave back" +
@@ -448,6 +460,156 @@ bot.onSlashCommand("register", async (handler, { channelId, args, userId }) => {
 });
 
 bot.onSlashCommand(
+  "testregister",
+  async (handler, { channelId, args, userId }) => {
+    if (!args || args.length === 0) {
+      await handler.sendMessage(
+        channelId,
+        "⚠️ Please provide a domain name to register.\n\nUsage: `/testregister <domain> [years]`\n\nExample: `/testregister myname` (1 year)\nExample: `/testregister myname 2` (2 years)\n\n⚠️ **Note:** This uses Sepolia testnet!"
+      );
+      return;
+    }
+
+    // Parse arguments
+    const domainArg = args[0];
+    const yearsArg = args[1] ? parseInt(args[1]) : 1;
+
+    // Validate years
+    if (isNaN(yearsArg) || yearsArg < 1 || yearsArg > 10) {
+      await handler.sendMessage(
+        channelId,
+        "⚠️ Invalid duration. Please specify 1-10 years.\n\nExample: `/testregister myname 2`"
+      );
+      return;
+    }
+
+    // Normalize the domain name
+    const { normalized, valid, reason } = normalizeENSName(domainArg);
+    const fullName = `${normalized}.eth`;
+
+    // Check validity before proceeding
+    if (!valid) {
+      await handler.sendMessage(channelId, `⚠️ Invalid domain: ${reason}`);
+      return;
+    }
+
+    await handler.sendMessage(
+      channelId,
+      `🧪 **Testing on Sepolia testnet**\n\nChecking availability for **${fullName}**...`
+    );
+
+    try {
+      // Check availability on Sepolia
+      const availability = await checkAvailabilitySepolia(normalized);
+
+      if (!availability.available) {
+        await handler.sendMessage(
+          channelId,
+          `❌ **${fullName}** is not available for registration on Sepolia.${
+            availability.reason ? `\n\nReason: ${availability.reason}` : ""
+          }`
+        );
+        return;
+      }
+
+      // Calculate registration cost
+      const { totalEth } = await calculateRegistrationCostSepolia(
+        normalized,
+        yearsArg
+      );
+
+      // Get user's wallet address
+      const userWallet = (await getSmartAccountFromUserId(bot, {
+        userId,
+      })) as `0x${string}`;
+
+      // Generate registration parameters for Sepolia
+      const params = generateRegistrationParamsSepolia(
+        normalized,
+        userWallet,
+        yearsArg
+      );
+
+      // Generate commitment hash
+      const commitmentHash = await makeCommitmentSepolia(params);
+
+      // Create commitment ID (using channelId + userId + domain for uniqueness)
+      const commitmentId = `testcommit-${channelId}-${userId}-${normalized}`;
+
+      // Store commitment state
+      pendingCommitments.set(commitmentId, {
+        userId,
+        channelId,
+        domain: fullName,
+        label: normalized,
+        commitment: commitmentHash,
+        secret: params.secret,
+        owner: userWallet,
+        duration: params.duration,
+        timestamp: Date.now(),
+      });
+
+      // Send confirmation message
+      await handler.sendMessage(
+        channelId,
+        `✅ **${fullName}** is available on Sepolia!\n\n` +
+          `📋 **Registration Details:**\n` +
+          `• Network: Sepolia Testnet\n` +
+          `• Duration: ${yearsArg} year${yearsArg > 1 ? "s" : ""}\n` +
+          `• Cost: ${totalEth} SepoliaETH\n` +
+          `• Owner: \`${userWallet}\`\n\n` +
+          `🔐 **Starting registration process...**\n` +
+          `Step 1/2: Submitting commitment transaction...`
+      );
+
+      // Prepare commit transaction data
+      const commitData = encodeFunctionData({
+        abi: CONTROLLER_ABI,
+        functionName: "commit",
+        args: [commitmentHash],
+      });
+
+      // Send commit transaction interaction request (Sepolia chainId is "11155111")
+      await handler.sendInteractionRequest(
+        channelId,
+        {
+          case: "transaction",
+          value: {
+            id: commitmentId,
+            title: `Commit ENS Registration: ${fullName} (Sepolia)`,
+            content: {
+              case: "evm",
+              value: {
+                chainId: "11155111", // Sepolia chainId
+                to: SEPOLIA_ENS_CONFIG.REGISTRAR_CONTROLLER,
+                value: "0",
+                data: commitData,
+                signerWallet: undefined,
+              },
+            },
+          },
+        },
+        hexToBytes(userId as `0x${string}`)
+      );
+
+      await handler.sendMessage(
+        channelId,
+        `📤 **Transaction request sent!**\n\n` +
+          `Please approve the commit transaction in your wallet.\n` +
+          `After confirmation, you'll need to wait 60 seconds before completing the registration.\n\n` +
+          `⚠️ **Make sure you're connected to Sepolia testnet!**`
+      );
+    } catch (error) {
+      console.error("Error initiating test registration:", error);
+      await handler.sendMessage(
+        channelId,
+        "❌ An error occurred while initiating registration on Sepolia. Please try again later."
+      );
+    }
+  }
+);
+
+bot.onSlashCommand(
   "portfolio",
   async (handler, { channelId, args, userId }) => {
     try {
@@ -586,8 +748,145 @@ bot.onInteractionResponse(async (handler, event) => {
   const txResponse = response.payload.content.value;
   const requestId = txResponse.requestId;
 
-  // Check if this is a commit transaction
-  if (requestId.startsWith("commit-")) {
+  // Check if this is a test commit transaction (Sepolia)
+  if (requestId.startsWith("testcommit-")) {
+    const commitment = pendingCommitments.get(requestId);
+
+    if (!commitment) {
+      console.error(`No commitment found for ID: ${requestId}`);
+      return;
+    }
+
+    // Check if the transaction was successful
+    if (txResponse.txHash) {
+      // Store the transaction hash
+      commitment.commitTxHash = txResponse.txHash;
+      pendingCommitments.set(requestId, commitment);
+
+      await handler.sendMessage(
+        channelId,
+        `✅ **Commit transaction confirmed on Sepolia!**\n\n` +
+          `Transaction: [View on Sepolia Etherscan](https://sepolia.etherscan.io/tx/${txResponse.txHash})\n\n` +
+          `⏳ **Waiting 60 seconds before next step...**\n` +
+          `This is required by ENS to prevent front-running attacks.`
+      );
+
+      // Wait 60 seconds, then send the register transaction request
+      setTimeout(async () => {
+        try {
+          // Recalculate cost to ensure it hasn't changed
+          const { totalWei, totalEth } = await calculateRegistrationCostSepolia(
+            commitment.label,
+            Number(commitment.duration / BigInt(31557600))
+          );
+
+          // Prepare register transaction data
+          const registerData = encodeFunctionData({
+            abi: CONTROLLER_ABI,
+            functionName: "register",
+            args: [
+              commitment.label,
+              commitment.owner,
+              commitment.duration,
+              commitment.secret,
+              SEPOLIA_ENS_CONFIG.PUBLIC_RESOLVER,
+              [] as `0x${string}`[], // data
+              true, // reverseRecord
+              0, // ownerControlledFuses
+            ],
+          });
+
+          // Create register request ID
+          const registerRequestId = requestId.replace(
+            "testcommit-",
+            "testregister-"
+          );
+
+          await handler.sendMessage(
+            channelId,
+            `⏰ **60 seconds have passed!**\n\n` +
+              `🔐 **Step 2/2: Final registration transaction (Sepolia)**\n` +
+              `Please approve the registration transaction to complete the process.\n\n` +
+              `💰 **Amount to pay:** ${totalEth} SepoliaETH`
+          );
+
+          // Send register transaction interaction request
+          await handler.sendInteractionRequest(
+            channelId,
+            {
+              case: "transaction",
+              value: {
+                id: registerRequestId,
+                title: `Register ${commitment.domain} (Sepolia)`,
+                content: {
+                  case: "evm",
+                  value: {
+                    chainId: "11155111", // Sepolia chainId
+                    to: SEPOLIA_ENS_CONFIG.REGISTRAR_CONTROLLER,
+                    value: totalWei.toString(),
+                    data: registerData,
+                    signerWallet: undefined,
+                  },
+                },
+              },
+            },
+            hexToBytes(userId as `0x${string}`)
+          );
+        } catch (error) {
+          console.error("Error sending register transaction:", error);
+          await handler.sendMessage(
+            channelId,
+            `❌ An error occurred while preparing the registration transaction. Please try again with a new \`/testregister\` command.`
+          );
+          pendingCommitments.delete(requestId);
+        }
+      }, REGISTRATION.MIN_COMMITMENT_AGE * 1000);
+    } else {
+      // Transaction was rejected or failed
+      await handler.sendMessage(
+        channelId,
+        `❌ Commit transaction was not confirmed. Registration cancelled.`
+      );
+      pendingCommitments.delete(requestId);
+    }
+  }
+  // Check if this is a test register transaction (Sepolia)
+  else if (requestId.startsWith("testregister-")) {
+    const commitRequestId = requestId.replace("testregister-", "testcommit-");
+    const commitment = pendingCommitments.get(commitRequestId);
+
+    if (!commitment) {
+      console.error(`No commitment found for ID: ${commitRequestId}`);
+      return;
+    }
+
+    // Check if the transaction was successful
+    if (txResponse.txHash) {
+      await handler.sendMessage(
+        channelId,
+        `🎉 **Registration successful on Sepolia!**\n\n` +
+          `**${commitment.domain}** is now registered to your wallet on Sepolia testnet!\n\n` +
+          `📋 **Details:**\n` +
+          `• Network: Sepolia Testnet\n` +
+          `• Owner: \`${commitment.owner}\`\n` +
+          `• Registration Tx: [View on Sepolia Etherscan](https://sepolia.etherscan.io/tx/${txResponse.txHash})\n` +
+          `• Commitment Tx: [View on Sepolia Etherscan](https://sepolia.etherscan.io/tx/${commitment.commitTxHash})\n\n` +
+          `✨ Your domain will be active shortly on Sepolia testnet.`
+      );
+
+      // Clean up the commitment
+      pendingCommitments.delete(commitRequestId);
+    } else {
+      // Transaction was rejected or failed
+      await handler.sendMessage(
+        channelId,
+        `❌ Registration transaction was not confirmed.\n\n` +
+          `The commitment is still valid for 24 hours. You can try again with the same domain.`
+      );
+    }
+  }
+  // Check if this is a commit transaction (Mainnet)
+  else if (requestId.startsWith("commit-")) {
     const commitment = pendingCommitments.get(requestId);
 
     if (!commitment) {
