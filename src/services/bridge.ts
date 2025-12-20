@@ -1,5 +1,6 @@
-import { createPublicClient, http, formatEther, parseEther } from "viem";
+import { createPublicClient, http, formatEther, parseEther, encodeFunctionData, parseEventLogs } from "viem";
 import { mainnet, base } from "viem/chains";
+import { spokePoolAbiV3 } from "@across-protocol/app-sdk/dist/abis/SpokePool/v3.js";
 import type { BalanceCheckResult, BridgeQuote, BridgeStatusResponse } from "../types/bridge";
 import {
   ACROSS_API_URL,
@@ -143,14 +144,33 @@ export function prepareBridgeTransaction(
   const inputToken = fromChainId === CHAIN_IDS.BASE ? WETH_ADDRESS.BASE : WETH_ADDRESS.MAINNET;
   const outputToken = toChainId === CHAIN_IDS.MAINNET ? WETH_ADDRESS.MAINNET : WETH_ADDRESS.BASE;
 
-  // For simplicity, we'll construct a basic deposit call
-  // In production, you'd want to use the full Across SDK for this
-  // For now, we'll return the spoke pool address and let the SDK handle it
+  // Get current timestamp for the quote
+  const quoteTimestamp = Math.floor(Date.now() / 1000);
+
+  // Encode the depositV3 function call
+  const data = encodeFunctionData({
+    abi: spokePoolAbiV3,
+    functionName: "depositV3",
+    args: [
+      recipient,                                                    // depositor (user's wallet)
+      recipient,                                                    // recipient (same wallet on destination chain)
+      inputToken,                                                   // inputToken (WETH on origin chain)
+      outputToken,                                                  // outputToken (WETH on destination chain)
+      amount,                                                       // inputAmount (amount to bridge)
+      outputAmount,                                                 // outputAmount (amount after fees)
+      BigInt(toChainId),                                           // destinationChainId
+      "0x0000000000000000000000000000000000000000" as `0x${string}`, // exclusiveRelayer (none)
+      quoteTimestamp,                                              // quoteTimestamp (current time)
+      0,                                                           // fillDeadline (0 = no deadline)
+      0,                                                           // exclusivityDeadline (0 = no exclusivity period)
+      "0x" as `0x${string}`,                                       // message (empty)
+    ],
+  });
 
   return {
     to: spokePoolAddress,
     value: amount.toString(),
-    data: "0x" as `0x${string}`, // Placeholder - would need proper encoding
+    data,
   };
 }
 
@@ -233,8 +253,8 @@ export function calculateRequiredMainnetETH(
 }
 
 /**
- * Extract deposit ID from a transaction receipt
- * This is a simplified version - in production you'd decode the transaction logs
+ * Extract deposit ID from a bridge transaction receipt
+ * Decodes the V3FundsDeposited event to get the depositId
  */
 export async function extractDepositId(
   txHash: `0x${string}`,
@@ -244,14 +264,24 @@ export async function extractDepositId(
     const client = chainId === CHAIN_IDS.BASE ? baseClient : mainnetClient;
     const receipt = await client.getTransactionReceipt({ hash: txHash });
 
-    // In a real implementation, you would:
-    // 1. Find the V3FundsDeposited event in the logs
-    // 2. Decode the depositId from the event data
-    // For now, we'll use a simplified approach
+    // Parse the V3FundsDeposited event from the transaction logs
+    const parsedLogs = parseEventLogs({
+      abi: spokePoolAbiV3,
+      eventName: "V3FundsDeposited",
+      logs: receipt.logs,
+    });
 
-    // The depositId is typically derived from the transaction hash and log index
-    // Simplified version: just use the tx hash as deposit ID
-    return txHash;
+    // Get the first (and should be only) V3FundsDeposited event
+    const depositEvent = parsedLogs?.[0];
+
+    if (!depositEvent) {
+      console.error("No V3FundsDeposited event found in transaction logs");
+      return null;
+    }
+
+    // Extract the depositId from the event args
+    // Convert to string as the API expects a string parameter
+    return depositEvent.args.depositId.toString();
   } catch (error) {
     console.error("Error extracting deposit ID:", error);
     return null;
