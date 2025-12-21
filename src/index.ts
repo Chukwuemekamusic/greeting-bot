@@ -1,5 +1,5 @@
 import { makeTownsBot, getSmartAccountFromUserId } from "@towns-protocol/bot";
-import { hexToBytes } from "viem";
+import { hexToBytes, formatEther, parseEther } from "viem";
 import { encodeFunctionData } from "viem";
 import commands from "./commands";
 import {
@@ -24,11 +24,25 @@ import {
   SEPOLIA_ENS_CONFIG,
   CONTROLLER_ABI,
   REGISTRATION,
+  ENS_VALIDATION,
 } from "./constants/ens";
 import type { CommitmentState } from "./types/ens";
 
+import {
+  checkBalance,
+  getBridgeQuote,
+  prepareBridgeTransaction,
+  calculateRequiredMainnetETH,
+} from "./services/bridge";
+
+import { CHAIN_IDS } from "./constants/bridge";
+import type { BridgeState } from "./types/bridge";
+
 // In-memory store for pending commitments
 const pendingCommitments = new Map<string, CommitmentState>();
+
+// In-memory store for pending bridges
+const pendingBridges = new Map<string, BridgeState>();
 
 const bot = await makeTownsBot(
   process.env.APP_PRIVATE_DATA!,
@@ -51,7 +65,8 @@ bot.onSlashCommand("help", async (handler, { channelId }) => {
       "• `/portfolio <address>` - View portfolio for an address\n" +
       "• `/portfolio <domain>` - View portfolio for a domain owner\n" +
       "• `/register <domain> [years]` - Register an ENS domain on mainnet (you pay gas)\n" +
-      "• `/testregister <domain> [years]` - Test ENS registration on Sepolia testnet 🧪\n\n" +
+      "• `/test_register <domain> [years]` - Test ENS registration on Sepolia testnet 🧪\n\n" +
+      "• `/bridge_register <domain> [years]` - Register an ENS domain on mainnet (bridge + gas) 🧪\n\n" +
       "**Message Triggers:**\n\n" +
       "• Mention me - I'll respond\n" +
       "• React with 👋 - I'll wave back" +
@@ -460,12 +475,12 @@ bot.onSlashCommand("register", async (handler, { channelId, args, userId }) => {
 });
 
 bot.onSlashCommand(
-  "testregister",
+  "test_register",
   async (handler, { channelId, args, userId }) => {
     if (!args || args.length === 0) {
       await handler.sendMessage(
         channelId,
-        "⚠️ Please provide a domain name to register.\n\nUsage: `/testregister <domain> [years]`\n\nExample: `/testregister myname` (1 year)\nExample: `/testregister myname 2` (2 years)\n\n⚠️ **Note:** This uses Sepolia testnet!"
+        "⚠️ Please provide a domain name to register.\n\nUsage: `/test_register <domain> [years]`\n\nExample: `/test_register myname` (1 year)\nExample: `/test_register myname 2` (2 years)\n\n⚠️ **Note:** This uses Sepolia testnet!"
       );
       return;
     }
@@ -478,7 +493,7 @@ bot.onSlashCommand(
     if (isNaN(yearsArg) || yearsArg < 1 || yearsArg > 10) {
       await handler.sendMessage(
         channelId,
-        "⚠️ Invalid duration. Please specify 1-10 years.\n\nExample: `/testregister myname 2`"
+        "⚠️ Invalid duration. Please specify 1-10 years.\n\nExample: `/test_register myname 2`"
       );
       return;
     }
@@ -604,6 +619,340 @@ bot.onSlashCommand(
       await handler.sendMessage(
         channelId,
         "❌ An error occurred while initiating registration on Sepolia. Please try again later."
+      );
+    }
+  }
+);
+
+bot.onSlashCommand(
+  "bridge_register",
+  async (handler, { channelId, args, userId }) => {
+    if (!args || args.length === 0) {
+      await handler.sendMessage(
+        channelId,
+        "⚠️ Please provide a domain name to register.\n\nUsage: `/bridge_register <domain> [years]`\n\nExample: `/bridge_register myname` (1 year)\nExample: `/bridge_register myname 2` (2 years)"
+      );
+      return;
+    }
+
+    // Parse arguments
+    const domainArg = args[0];
+    const yearsArg = args[1] ? parseInt(args[1]) : 1;
+
+    // Validate years
+    if (isNaN(yearsArg) || yearsArg < 1 || yearsArg > 10) {
+      await handler.sendMessage(
+        channelId,
+        "⚠️ Invalid duration. Please specify 1-10 years.\n\nExample: `/register myname 2`"
+      );
+      return;
+    }
+    // Normalize the domain name
+    const { normalized, valid, reason } = normalizeENSName(domainArg);
+    const fullName = `${normalized}.eth`;
+
+    // Check validity before proceeding
+    if (!valid) {
+      await handler.sendMessage(channelId, `⚠️ Invalid domain: ${reason}`);
+      return;
+    }
+
+    // Check minimum length requirement
+    if (normalized.length < ENS_VALIDATION.MIN_LENGTH) {
+      await handler.sendMessage(
+        channelId,
+        `⚠️ **Domain too short**\n\n` +
+          `ENS domains must be at least ${ENS_VALIDATION.MIN_LENGTH} characters long.\n` +
+          `**${normalized}** is only ${normalized.length} character${
+            normalized.length === 1 ? "" : "s"
+          }.`
+      );
+      return;
+    }
+
+    await handler.sendMessage(
+      channelId,
+      `Checking availability for **${fullName}**...`
+    );
+
+    try {
+      // Check availability
+      const availability = await checkAvailability(normalized);
+
+      if (!availability.available) {
+        await handler.sendMessage(
+          channelId,
+          `❌ **${fullName}** is not available for registration.${
+            availability.reason ? `\n\nReason: ${availability.reason}` : ""
+          }`
+        );
+        return;
+      }
+
+      // Calculate registration cost
+      const { totalWei, totalEth } = await calculateRegistrationCost(
+        normalized,
+        yearsArg
+      );
+
+      // Get user's wallet address
+      const userWallet = (await getSmartAccountFromUserId(bot, {
+        userId,
+      })) as `0x${string}`;
+
+      // Calculate total ETH needed on Mainnet (registration + gas + buffer)
+      const requiredMainnetETH = calculateRequiredMainnetETH(totalWei);
+
+      // Check user's balance on Mainnet
+      await handler.sendMessage(channelId, `Checking your Mainnet balance...`);
+
+      const mainnetBalance = await checkBalance(
+        userWallet,
+        CHAIN_IDS.MAINNET,
+        requiredMainnetETH
+      );
+
+      if (!mainnetBalance.sufficient) {
+        // User doesn't have enough on Mainnet, check Base balance
+        await handler.sendMessage(channelId, `Checking your Base balance...`);
+
+        const baseBalance = await checkBalance(userWallet, CHAIN_IDS.BASE);
+
+        // Get bridge quote first to calculate total needed including fees
+        await handler.sendMessage(channelId, `Getting bridge quote...`);
+        const bridgeQuote = await getBridgeQuote(
+          requiredMainnetETH,
+          CHAIN_IDS.BASE,
+          CHAIN_IDS.MAINNET
+        );
+
+        if (bridgeQuote.isAmountTooLow) {
+          await handler.sendMessage(
+            channelId,
+            `❌ Amount too low for bridge. Minimum: ${formatEther(
+              BigInt(bridgeQuote.limits.minDeposit)
+            )} ETH`
+          );
+          return;
+        }
+
+        // Calculate output amount after bridge fees
+        const bridgeFeeWei = BigInt(bridgeQuote.totalRelayFee.total);
+        const outputAmount =
+          requiredMainnetETH > bridgeFeeWei
+            ? requiredMainnetETH - bridgeFeeWei
+            : 0n;
+
+        // Validate that output amount covers registration cost
+        if (outputAmount < totalWei) {
+          await handler.sendMessage(
+            channelId,
+            `❌ **Bridge fees too high**\n\n` +
+              `After bridge fees of ${formatEther(bridgeFeeWei)} ETH, ` +
+              `you would only receive ${formatEther(
+                outputAmount
+              )} ETH on Mainnet.\n\n` +
+              `This is not enough to cover the registration cost of ${totalEth} ETH.\n\n` +
+              `Please fund your Mainnet wallet directly or wait for lower fees.`
+          );
+          return;
+        }
+
+        // Estimate gas needed on Base for bridge transaction (rough estimate)
+        const baseGasEstimate = parseEther("0.0005");
+        const totalNeededOnBase =
+          requiredMainnetETH + bridgeFeeWei + baseGasEstimate;
+
+        if (baseBalance.balance < totalNeededOnBase) {
+          // User doesn't have enough on Base to cover bridge + fees + gas
+          const shortfall = totalNeededOnBase - baseBalance.balance;
+          await handler.sendMessage(
+            channelId,
+            `❌ **Insufficient funds**\n\n` +
+              `You need ${formatEther(
+                requiredMainnetETH
+              )} ETH on Ethereum Mainnet to register ${fullName}.\n\n` +
+              `**To bridge from Base, you need:**\n` +
+              `• Bridge amount: ${formatEther(requiredMainnetETH)} ETH\n` +
+              `• Bridge fee: ${formatEther(bridgeFeeWei)} ETH (${
+                bridgeQuote.totalRelayFee.pct
+              }%)\n` +
+              `• Gas on Base: ~${formatEther(baseGasEstimate)} ETH\n` +
+              `• **Total needed on Base:** ${formatEther(
+                totalNeededOnBase
+              )} ETH\n\n` +
+              `**Your balances:**\n` +
+              `• Mainnet: ${mainnetBalance.balanceEth} ETH\n` +
+              `• Base: ${baseBalance.balanceEth} ETH\n\n` +
+              `You need ${formatEther(
+                shortfall
+              )} more ETH on Base to complete the bridge.`
+          );
+          return;
+        }
+
+        // User has enough on Base, show bridge details
+        await handler.sendMessage(
+          channelId,
+          `💡 **Bridge Required**\n\n` +
+            `**Registration Details:**\n` +
+            `• Domain: ${fullName}\n` +
+            `• Registration cost: ${totalEth} ETH\n` +
+            `• Total needed (incl. gas): ${formatEther(
+              requiredMainnetETH
+            )} ETH\n\n` +
+            `**Bridge Details:**\n` +
+            `• From: Base (${baseBalance.balanceEth} ETH available)\n` +
+            `• To: Ethereum Mainnet\n` +
+            `• Bridge fee: ~${formatEther(bridgeFeeWei)} ETH (${
+              bridgeQuote.totalRelayFee.pct
+            }%)\n` +
+            `• You'll receive: ~${formatEther(outputAmount)} ETH on Mainnet\n` +
+            `• Estimated time: ~${bridgeQuote.estimatedFillTimeSec} seconds\n\n` +
+            `⚠️ **Note:** The domain might be taken during bridging if it's popular.\n\n` +
+            `Preparing bridge transaction...`
+        );
+
+        // Prepare bridge transaction with correct outputAmount
+        const bridgeData = prepareBridgeTransaction(
+          requiredMainnetETH,
+          userWallet,
+          outputAmount,
+          CHAIN_IDS.BASE,
+          CHAIN_IDS.MAINNET
+        );
+
+        // Create bridge ID
+        const bridgeId = `bridge-${channelId}-${userId}-${normalized}`;
+
+        // Store bridge state
+        pendingBridges.set(bridgeId, {
+          userId,
+          channelId,
+          domain: fullName,
+          label: normalized,
+          years: yearsArg,
+          fromChain: CHAIN_IDS.BASE,
+          toChain: CHAIN_IDS.MAINNET,
+          amount: requiredMainnetETH,
+          recipient: userWallet,
+          timestamp: Date.now(),
+          status: "pending",
+        });
+
+        // Send bridge transaction request
+        await handler.sendInteractionRequest(
+          channelId,
+          {
+            case: "transaction",
+            value: {
+              id: bridgeId,
+              title: `Bridge ${formatEther(requiredMainnetETH)} ETH to Mainnet`,
+              content: {
+                case: "evm",
+                value: {
+                  chainId: CHAIN_IDS.BASE.toString(),
+                  to: bridgeData.to,
+                  value: bridgeData.value,
+                  data: bridgeData.data,
+                  signerWallet: undefined,
+                },
+              },
+            },
+          },
+          hexToBytes(userId as `0x${string}`)
+        );
+
+        await handler.sendMessage(
+          channelId,
+          `📤 **Bridge transaction sent!**\n\n` +
+            `Please approve the bridge transaction in your wallet.\n` +
+            `Once confirmed, I'll automatically proceed with ENS registration.`
+        );
+
+        return;
+      }
+
+      // User has enough on Mainnet, proceed directly with ENS registration
+      // Generate registration parameters
+      const params = generateRegistrationParams(
+        normalized,
+        userWallet,
+        yearsArg
+      );
+
+      // Generate commitment hash
+      const commitmentHash = await makeCommitment(params);
+
+      // Create commitment ID (using channelId + userId + domain for uniqueness)
+      const commitmentId = `commit-${channelId}-${userId}-${normalized}`;
+
+      // Store commitment state
+      pendingCommitments.set(commitmentId, {
+        userId,
+        channelId,
+        domain: fullName,
+        label: normalized,
+        commitment: commitmentHash,
+        secret: params.secret,
+        owner: userWallet,
+        duration: params.duration,
+        timestamp: Date.now(),
+      });
+
+      // Send confirmation message
+      await handler.sendMessage(
+        channelId,
+        `✅ **${fullName}** is available!\n\n` +
+          `📋 **Registration Details:**\n` +
+          `• Duration: ${yearsArg} year${yearsArg > 1 ? "s" : ""}\n` +
+          `• Cost: ${totalEth} ETH\n` +
+          `• Owner: \`${userWallet}\`\n\n` +
+          `🔐 **Starting registration process...**\n` +
+          `Step 1/2: Submitting commitment transaction...`
+      );
+
+      // Prepare commit transaction data
+      const commitData = encodeFunctionData({
+        abi: CONTROLLER_ABI,
+        functionName: "commit",
+        args: [commitmentHash],
+      });
+
+      // Send commit transaction interaction request
+      await handler.sendInteractionRequest(
+        channelId,
+        {
+          case: "transaction",
+          value: {
+            id: commitmentId,
+            title: `Commit ENS Registration: ${fullName}`,
+            content: {
+              case: "evm",
+              value: {
+                chainId: REGISTRATION.CHAIN_ID,
+                to: ENS_CONFIG.REGISTRAR_CONTROLLER,
+                value: "0",
+                data: commitData,
+                signerWallet: undefined,
+              },
+            },
+          },
+        },
+        hexToBytes(userId as `0x${string}`)
+      );
+
+      await handler.sendMessage(
+        channelId,
+        `📤 **Transaction request sent!**\n\n` +
+          `Please approve the commit transaction in your wallet.\n` +
+          `After confirmation, you'll need to wait 60 seconds before completing the registration.`
+      );
+    } catch (error) {
+      console.error("Error initiating registration:", error);
+      await handler.sendMessage(
+        channelId,
+        "❌ An error occurred while initiating registration. Please try again later."
       );
     }
   }
@@ -799,7 +1148,7 @@ bot.onInteractionResponse(async (handler, event) => {
           // Create register request ID
           const registerRequestId = requestId.replace(
             "testcommit-",
-            "testregister-"
+            "test_register-"
           );
 
           await handler.sendMessage(
@@ -836,7 +1185,7 @@ bot.onInteractionResponse(async (handler, event) => {
           console.error("Error sending register transaction:", error);
           await handler.sendMessage(
             channelId,
-            `❌ An error occurred while preparing the registration transaction. Please try again with a new \`/testregister\` command.`
+            `❌ An error occurred while preparing the registration transaction. Please try again with a new \`/test_register\` command.`
           );
           pendingCommitments.delete(requestId);
         }
@@ -851,8 +1200,8 @@ bot.onInteractionResponse(async (handler, event) => {
     }
   }
   // Check if this is a test register transaction (Sepolia)
-  else if (requestId.startsWith("testregister-")) {
-    const commitRequestId = requestId.replace("testregister-", "testcommit-");
+  else if (requestId.startsWith("test_register-")) {
+    const commitRequestId = requestId.replace("test_register-", "testcommit-");
     const commitment = pendingCommitments.get(commitRequestId);
 
     if (!commitment) {
