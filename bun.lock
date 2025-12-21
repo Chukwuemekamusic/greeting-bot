@@ -5,6 +5,7 @@
     "": {
       "name": "greeting-bot",
       "dependencies": {
+        "@across-protocol/app-sdk": "^0.4.4",
         "@connectrpc/connect-node": "^2.1.0",
         "@towns-protocol/bot": "^0.0.438",
         "@towns-protocol/proto": "^0.0.438",
@@ -26,6 +27,8 @@
     },
   },
   "packages": {
+    "@across-protocol/app-sdk": ["@across-protocol/app-sdk@0.4.4", "", { "peerDependencies": { "viem": "^2.31.2" } }, "sha512-Yz+C1/jFJCQ3TRXRxCn+WXW1K0aLyrGi+S2p7Ot+MSO6X/rThRCbZpXdfPkSRLxdNBKXL5h3LAEgwwj1j2Pa7w=="],
+
     "@adraffy/ens-normalize": ["@adraffy/ens-normalize@1.11.1", "", {}, "sha512-nhCBV3quEgesuf7c7KYfperqSS14T8bYuvJ8PcLJp6znkZpFc0AuW4qBtr8eKVyPPe/8RSr7sglCWPU5eaxwKQ=="],
 
     "@babel/runtime": ["@babel/runtime@7.28.4", "", {}, "sha512-Q/N6JNWvIvPnLDvjlE1OUBLPQHH6l3CltCEsHIujp45zQUSSh8K+gHnaEX45yAT1nyngnINhvWtzN+Nb9D8RAQ=="],
