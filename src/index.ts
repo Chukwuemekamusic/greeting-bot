@@ -65,7 +65,7 @@ bot.onSlashCommand("help", async (handler, { channelId }) => {
       "• `/portfolio <address>` - View portfolio for an address\n" +
       "• `/portfolio <domain>` - View portfolio for a domain owner\n" +
       "• `/register <domain> [years]` - Register an ENS domain on mainnet (you pay gas)\n" +
-      "• `/testregister <domain> [years]` - Test ENS registration on Sepolia testnet 🧪\n\n" +
+      "• `/test_register <domain> [years]` - Test ENS registration on Sepolia testnet 🧪\n\n" +
       "• `/bridge_register <domain> [years]` - Register an ENS domain on mainnet (bridge + gas) 🧪\n\n" +
       "**Message Triggers:**\n\n" +
       "• Mention me - I'll respond\n" +
@@ -475,12 +475,12 @@ bot.onSlashCommand("register", async (handler, { channelId, args, userId }) => {
 });
 
 bot.onSlashCommand(
-  "testregister",
+  "test_register",
   async (handler, { channelId, args, userId }) => {
     if (!args || args.length === 0) {
       await handler.sendMessage(
         channelId,
-        "⚠️ Please provide a domain name to register.\n\nUsage: `/testregister <domain> [years]`\n\nExample: `/testregister myname` (1 year)\nExample: `/testregister myname 2` (2 years)\n\n⚠️ **Note:** This uses Sepolia testnet!"
+        "⚠️ Please provide a domain name to register.\n\nUsage: `/test_register <domain> [years]`\n\nExample: `/test_register myname` (1 year)\nExample: `/test_register myname 2` (2 years)\n\n⚠️ **Note:** This uses Sepolia testnet!"
       );
       return;
     }
@@ -493,7 +493,7 @@ bot.onSlashCommand(
     if (isNaN(yearsArg) || yearsArg < 1 || yearsArg > 10) {
       await handler.sendMessage(
         channelId,
-        "⚠️ Invalid duration. Please specify 1-10 years.\n\nExample: `/testregister myname 2`"
+        "⚠️ Invalid duration. Please specify 1-10 years.\n\nExample: `/test_register myname 2`"
       );
       return;
     }
@@ -1148,7 +1148,7 @@ bot.onInteractionResponse(async (handler, event) => {
           // Create register request ID
           const registerRequestId = requestId.replace(
             "testcommit-",
-            "testregister-"
+            "test_register-"
           );
 
           await handler.sendMessage(
@@ -1185,7 +1185,7 @@ bot.onInteractionResponse(async (handler, event) => {
           console.error("Error sending register transaction:", error);
           await handler.sendMessage(
             channelId,
-            `❌ An error occurred while preparing the registration transaction. Please try again with a new \`/testregister\` command.`
+            `❌ An error occurred while preparing the registration transaction. Please try again with a new \`/test_register\` command.`
           );
           pendingCommitments.delete(requestId);
         }
@@ -1200,8 +1200,8 @@ bot.onInteractionResponse(async (handler, event) => {
     }
   }
   // Check if this is a test register transaction (Sepolia)
-  else if (requestId.startsWith("testregister-")) {
-    const commitRequestId = requestId.replace("testregister-", "testcommit-");
+  else if (requestId.startsWith("test_register-")) {
+    const commitRequestId = requestId.replace("test_register-", "testcommit-");
     const commitment = pendingCommitments.get(commitRequestId);
 
     if (!commitment) {

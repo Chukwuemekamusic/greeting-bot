@@ -32,7 +32,7 @@ const commands = [
     description: "Register an ENS domain (you pay gas)",
   },
   {
-    name: "testregister",
+    name: "test_register",
     description: "Test ENS registration on Sepolia testnet",
   },
   {
