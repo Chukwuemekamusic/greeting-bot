@@ -3,11 +3,13 @@ import { mainnet } from "viem/chains";
 import { readContract } from "viem/actions";
 import {
   ENS_CONFIG,
+  SEPOLIA_ENS_CONFIG,
   TIME,
   CONTROLLER_ABI,
   BASE_REGISTRAR_ABI,
   ENS_REGISTRY_ABI,
   REGISTRATION,
+  SEPOLIA_RPC_URL,
 } from "../constants/ens";
 import { normalizeENSName, getTokenId, namehash } from "../utils/ens";
 import type {
@@ -774,7 +776,8 @@ export function generateRegistrationParams(
   const duration = BigInt(durationYears) * TIME.SECONDS_PER_YEAR;
 
   // Use zero address as resolver (will use default)
-  const resolver = "0x0000000000000000000000000000000000000000" as `0x${string}`;
+  const resolver =
+    "0x0000000000000000000000000000000000000000" as `0x${string}`;
 
   // No additional data
   const data: `0x${string}`[] = [];
@@ -851,5 +854,121 @@ export async function calculateRegistrationCost(
   } catch (error) {
     console.error("Error calculating registration cost:", error);
     throw error;
+  }
+}
+
+/**
+ * Prepares ENS domain transfer data
+ * @param domainName - The ENS domain name to transfer
+ * @param fromAddress - Current owner's address
+ * @param toAddress - Recipient's address (can be ENS name or 0x address)
+ * @param isSepolia - Whether to use Sepolia testnet
+ * @returns Transfer validation result with tokenId and resolved recipient address
+ */
+export async function prepareDomainTransfer(
+  domainName: string,
+  fromAddress: `0x${string}`,
+  toAddress: string,
+  isSepolia: boolean = false
+): Promise<
+  | {
+      success: true;
+      label: string;
+      fullName: string;
+      tokenId: bigint;
+      resolvedRecipient: `0x${string}`;
+    }
+  | { success: false; reason: string }
+> {
+  try {
+    // Normalize and validate the domain name
+    const { normalized, valid, reason } = normalizeENSName(domainName);
+    const fullName = `${normalized}.eth`;
+
+    if (!valid) {
+      return {
+        success: false,
+        reason: reason || "Invalid domain name",
+      };
+    }
+
+    const tokenId = getTokenId(normalized);
+
+    // Select the appropriate client
+    const client = isSepolia
+      ? createPublicClient({
+          chain: { id: 11155111, name: "sepolia" } as any,
+          transport: http(SEPOLIA_RPC_URL),
+        })
+      : ethereumClient;
+
+    const baseRegistrarAddress = isSepolia
+      ? SEPOLIA_ENS_CONFIG.BASE_REGISTRAR
+      : ENS_CONFIG.BASE_REGISTRAR;
+
+    // Verify ownership
+    try {
+      const currentOwner = (await readContract(client, {
+        address: baseRegistrarAddress,
+        abi: BASE_REGISTRAR_ABI,
+        functionName: "ownerOf",
+        args: [tokenId],
+      })) as string;
+
+      if (currentOwner.toLowerCase() !== fromAddress.toLowerCase()) {
+        return {
+          success: false,
+          reason: `You don't own ${fullName}. Current owner: ${currentOwner}`,
+        };
+      }
+    } catch (error) {
+      return {
+        success: false,
+        reason: `${fullName} is not registered or has expired beyond the grace period`,
+      };
+    }
+
+    // Resolve recipient address
+    let resolvedRecipient: `0x${string}`;
+
+    // Check if toAddress is already a valid Ethereum address
+    if (/^0x[a-fA-F0-9]{40}$/.test(toAddress)) {
+      resolvedRecipient = toAddress as `0x${string}`;
+    } else {
+      // Try to resolve as ENS name
+      const resolveResult = await resolveENSToAddress(toAddress);
+      if (!resolveResult.success) {
+        return {
+          success: false,
+          reason: `Could not resolve recipient: ${resolveResult.reason}`,
+        };
+      }
+      resolvedRecipient = resolveResult.address as `0x${string}`;
+    }
+
+    // Validate recipient is not zero address
+    if (
+      resolvedRecipient.toLowerCase() ===
+      "0x0000000000000000000000000000000000000000"
+    ) {
+      return {
+        success: false,
+        reason: "Cannot transfer to zero address (this would burn the domain)",
+      };
+    }
+
+    return {
+      success: true,
+      label: normalized,
+      fullName,
+      tokenId,
+      resolvedRecipient,
+    };
+  } catch (error) {
+    console.error("Error preparing domain transfer:", error);
+    return {
+      success: false,
+      reason: "Error preparing transfer",
+    };
   }
 }

@@ -133,6 +133,17 @@ export const BASE_REGISTRAR_ABI = [
     inputs: [{ name: "tokenId", type: "uint256" }],
     outputs: [{ type: "address" }],
   },
+  {
+    name: "safeTransferFrom",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "from", type: "address" },
+      { name: "to", type: "address" },
+      { name: "tokenId", type: "uint256" },
+    ],
+    outputs: [],
+  },
 ] as const;
 
 export const ENS_REGISTRY_ABI = [

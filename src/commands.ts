@@ -36,6 +36,10 @@ const commands = [
     description: "Test ENS registration on Sepolia testnet",
   },
   {
+    name: "test_transfer",
+    description: "Transfer ENS domain on Sepolia testnet",
+  },
+  {
     name: "bridge_register",
     description: "Register an ENS domain using Towns Bridge (no gas)",
   },

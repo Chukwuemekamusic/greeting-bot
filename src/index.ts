@@ -11,6 +11,7 @@ import {
   generateRegistrationParams,
   makeCommitment,
   calculateRegistrationCost,
+  prepareDomainTransfer,
 } from "./services/ens";
 import {
   checkAvailabilitySepolia,
@@ -23,6 +24,7 @@ import {
   ENS_CONFIG,
   SEPOLIA_ENS_CONFIG,
   CONTROLLER_ABI,
+  BASE_REGISTRAR_ABI,
   REGISTRATION,
   ENS_VALIDATION,
 } from "./constants/ens";
@@ -66,6 +68,7 @@ bot.onSlashCommand("help", async (handler, { channelId }) => {
       "• `/portfolio <domain>` - View portfolio for a domain owner\n" +
       "• `/register <domain> [years]` - Register an ENS domain on mainnet (you pay gas)\n" +
       "• `/test_register <domain> [years]` - Test ENS registration on Sepolia testnet 🧪\n\n" +
+      "• `/test_transfer <domain> <recipient>` - Transfer ENS domain on Sepolia testnet 🧪\n" +
       "• `/bridge_register <domain> [years]` - Register an ENS domain on mainnet (bridge + gas) 🧪\n\n" +
       "**Message Triggers:**\n\n" +
       "• Mention me - I'll respond\n" +
@@ -619,6 +622,124 @@ bot.onSlashCommand(
       await handler.sendMessage(
         channelId,
         "❌ An error occurred while initiating registration on Sepolia. Please try again later."
+      );
+    }
+  }
+);
+
+bot.onSlashCommand(
+  "test_transfer",
+  async (handler, { channelId, args, userId }) => {
+    if (!args || args.length < 2) {
+      await handler.sendMessage(
+        channelId,
+        "⚠️ Please provide domain name and recipient address.\n\n" +
+          "Usage: `/test_transfer <domain> <recipient>`\n\n" +
+          "Examples:\n" +
+          "• `/test_transfer myname 0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb`\n" +
+          "• `/test_transfer myname vitalik.eth`\n\n" +
+          "⚠️ **Note:** This uses Sepolia testnet!"
+      );
+      return;
+    }
+
+    const domainArg = args[0];
+    const recipientArg = args[1];
+
+    await handler.sendMessage(
+      channelId,
+      `🧪 **Testing on Sepolia testnet**\n\nPreparing to transfer **${domainArg}.eth**...`
+    );
+
+    try {
+      // Get user's wallet address
+      const userWallet = (await getSmartAccountFromUserId(bot, {
+        userId,
+      })) as `0x${string}`;
+
+      // Prepare and validate the transfer
+      const prepareResult = await prepareDomainTransfer(
+        domainArg,
+        userWallet,
+        recipientArg,
+        true // isSepolia
+      );
+
+      if (!prepareResult.success) {
+        await handler.sendMessage(
+          channelId,
+          `❌ **Transfer failed**\n\n${prepareResult.reason}`
+        );
+        return;
+      }
+
+      const { fullName, tokenId, resolvedRecipient } = prepareResult;
+
+      // Format recipient for display
+      const recipientDisplay =
+        recipientArg === resolvedRecipient
+          ? resolvedRecipient
+          : `${recipientArg} (${resolvedRecipient.slice(
+              0,
+              8
+            )}...${resolvedRecipient.slice(-6)})`;
+
+      // Prepare transfer transaction data
+      const transferData = encodeFunctionData({
+        abi: BASE_REGISTRAR_ABI,
+        functionName: "safeTransferFrom",
+        args: [userWallet, resolvedRecipient, tokenId],
+      });
+
+      // Create transfer request ID
+      const transferId = `testtransfer-${channelId}-${userId}-${prepareResult.label}`;
+
+      // Send confirmation message
+      await handler.sendMessage(
+        channelId,
+        `✅ **Transfer validation passed!**\n\n` +
+          `📋 **Transfer Details:**\n` +
+          `• Network: Sepolia Testnet\n` +
+          `• Domain: **${fullName}**\n` +
+          `• From: \`${userWallet.slice(0, 8)}...${userWallet.slice(-6)}\`\n` +
+          `• To: \`${recipientDisplay}\`\n\n` +
+          `🔐 **Sending transfer request...**`
+      );
+
+      // Send transfer transaction interaction request
+      await handler.sendInteractionRequest(
+        channelId,
+        {
+          case: "transaction",
+          value: {
+            id: transferId,
+            title: `Transfer ${fullName} (Sepolia)`,
+            content: {
+              case: "evm",
+              value: {
+                chainId: "11155111", // Sepolia chainId
+                to: SEPOLIA_ENS_CONFIG.BASE_REGISTRAR,
+                value: "0",
+                data: transferData,
+                signerWallet: undefined,
+              },
+            },
+          },
+        },
+        hexToBytes(userId as `0x${string}`)
+      );
+
+      await handler.sendMessage(
+        channelId,
+        `📤 **Transaction request sent!**\n\n` +
+          `Please approve the transfer in your wallet.\n\n` +
+          `⚠️ **Make sure you're connected to Sepolia testnet!**`
+      );
+    } catch (error) {
+      console.error("Error initiating test transfer:", error);
+      await handler.sendMessage(
+        channelId,
+        "❌ An error occurred while initiating transfer on Sepolia. Please try again later."
       );
     }
   }
@@ -1231,6 +1352,31 @@ bot.onInteractionResponse(async (handler, event) => {
         channelId,
         `❌ Registration transaction was not confirmed.\n\n` +
           `The commitment is still valid for 24 hours. You can try again with the same domain.`
+      );
+    }
+  }
+  // Check if this is a test transfer transaction (Sepolia)
+  else if (requestId.startsWith("testtransfer-")) {
+    // Extract domain label from requestId (format: testtransfer-{channelId}-{userId}-{label})
+    const parts = requestId.split("-");
+    const label = parts.slice(3).join("-"); // In case label has hyphens
+    const fullName = `${label}.eth`;
+
+    if (txResponse.txHash) {
+      await handler.sendMessage(
+        channelId,
+        `🎉 **Transfer successful on Sepolia!**\n\n` +
+          `**${fullName}** has been transferred!\n\n` +
+          `📋 **Details:**\n` +
+          `• Network: Sepolia Testnet\n` +
+          `• Transaction: [View on Sepolia Etherscan](https://sepolia.etherscan.io/tx/${txResponse.txHash})\n\n` +
+          `✨ The domain ownership has been updated on Sepolia testnet.`
+      );
+    } else {
+      await handler.sendMessage(
+        channelId,
+        `❌ Transfer transaction was cancelled or failed.\n\n` +
+          `No changes were made to **${fullName}** ownership.`
       );
     }
   }
