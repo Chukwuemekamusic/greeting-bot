@@ -50,3 +50,13 @@ export type PendingWalletSelection = {
   bridgeFee: bigint;
   timestamp: number;
 };
+
+/**
+ * Pending test selection state (for test_wallet_pick command)
+ */
+export type PendingTestSelection = {
+  userId: string;
+  channelId: string;
+  allWallets: WalletInfo[];
+  timestamp: number;
+};

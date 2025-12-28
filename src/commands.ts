@@ -43,6 +43,10 @@ const commands = [
     name: "bridge_register",
     description: "Register an ENS domain using Towns Bridge (no gas)",
   },
+  {
+    name: "test_wallet_pick",
+    description: "Test wallet selection (includes all wallet types)",
+  },
 ] as const satisfies BotCommand[];
 
 export default commands;

@@ -47,7 +47,7 @@ import {
 
 import { CHAIN_IDS } from "./constants/bridge";
 import type { BridgeState } from "./types/bridge";
-import type { PendingWalletSelection } from "./types/wallet";
+import type { PendingWalletSelection, PendingTestSelection } from "./types/wallet";
 
 // In-memory store for pending commitments
 const pendingCommitments = new Map<string, CommitmentState>();
@@ -57,6 +57,9 @@ const pendingBridges = new Map<string, BridgeState>();
 
 // In-memory store for pending wallet selections
 const pendingWalletSelections = new Map<string, PendingWalletSelection>();
+
+// In-memory store for pending test selections
+const pendingTestSelections = new Map<string, PendingTestSelection>();
 
 const bot = await makeTownsBot(
   process.env.APP_PRIVATE_DATA!,
@@ -79,9 +82,10 @@ bot.onSlashCommand("help", async (handler, { channelId }) => {
       "• `/portfolio <address>` - View portfolio for an address\n" +
       "• `/portfolio <domain>` - View portfolio for a domain owner\n" +
       "• `/register <domain> [years]` - Register an ENS domain on mainnet (you pay gas)\n" +
-      "• `/test_register <domain> [years]` - Test ENS registration on Sepolia testnet 🧪\n\n" +
+      "• `/test_register <domain> [years]` - Test ENS registration on Sepolia testnet 🧪\n" +
       "• `/test_transfer <domain> <recipient>` - Transfer ENS domain on Sepolia testnet 🧪\n" +
-      "• `/bridge_register <domain> [years]` - Register an ENS domain on mainnet (bridge + gas) 🧪\n\n" +
+      "• `/bridge_register <domain> [years]` - Register an ENS domain on mainnet (bridge + gas) 🧪\n" +
+      "• `/test_wallet_pick` - Test wallet selection with all linked wallets 🧪\n\n" +
       "**Message Triggers:**\n\n" +
       "• Mention me - I'll respond\n" +
       "• React with 👋 - I'll wave back" +
@@ -982,6 +986,111 @@ bot.onSlashCommand(
   }
 );
 
+// ===== TEST WALLET PICK COMMAND =====
+bot.onSlashCommand(
+  "test_wallet_pick",
+  async (handler, { channelId, userId }) => {
+    try {
+      await handler.sendMessage(channelId, `🔍 Detecting your linked wallets...`);
+
+      // Get all linked wallets (no filtering - include smart accounts)
+      const linkedWallets = await getLinkedWallets(bot, userId as `0x${string}`);
+
+      if (!linkedWallets || linkedWallets.length === 0) {
+        await handler.sendMessage(
+          channelId,
+          `⚠️ **No linked wallets found**\n\n` +
+          `Please link a wallet to your account in Towns settings.`
+        );
+        return;
+      }
+
+      // Create clients for balance checking
+      const { createPublicClient, http } = await import("viem");
+      const { mainnet, base } = await import("viem/chains");
+
+      const mainnetClient = createPublicClient({
+        chain: mainnet,
+        transport: http(process.env.MAINNET_RPC_URL),
+      });
+
+      const baseClient = createPublicClient({
+        chain: base,
+        transport: http(`https://mainnet.base.org`),
+      });
+
+      // Get balance information for ALL wallets (including smart accounts)
+      await handler.sendMessage(channelId, `🔍 Analyzing wallet types and balances...`);
+
+      const allWalletsWithBalances = await Promise.all(
+        linkedWallets.map((wallet) =>
+          getWalletBalances(wallet, mainnetClient, baseClient)
+        )
+      );
+
+      // Create interactive wallet selection form
+      const selectionId = `test-wallet-pick-${channelId}-${userId}-${Date.now()}`;
+
+      // Store selection state
+      pendingTestSelections.set(selectionId, {
+        userId,
+        channelId,
+        allWallets: allWalletsWithBalances,
+        timestamp: Date.now(),
+      });
+
+      // Build form components - buttons for all wallets
+      const walletOptions = allWalletsWithBalances.map((wallet) => {
+        const shortAddr = `${wallet.address.slice(0, 6)}...${wallet.address.slice(-4)}`;
+        const type = wallet.isEOA ? "EOA" : "Smart Account";
+        const mainnetEth = formatEther(wallet.balances.mainnet);
+        const baseEth = formatEther(wallet.balances.base);
+
+        return {
+          id: wallet.address,
+          component: {
+            case: "button" as const,
+            value: {
+              label: `${shortAddr} (${type}) - M: ${mainnetEth} / B: ${baseEth}`,
+            },
+          },
+        };
+      });
+
+      // Show wallet selection form
+      await handler.sendMessage(
+        channelId,
+        `✅ **Wallet Detection Complete!**\n\n` +
+        `Found ${allWalletsWithBalances.length} linked wallet(s).\n\n` +
+        `**Your Wallets:**\n` +
+        allWalletsWithBalances.map(formatWalletDisplay).join('\n\n') +
+        `\n\n**Select a wallet to test with:**`
+      );
+
+      // Send interactive form
+      await handler.sendInteractionRequest(
+        channelId,
+        {
+          case: "form",
+          value: {
+            id: selectionId,
+            title: "Select Wallet for Test",
+            components: walletOptions,
+          },
+        },
+        hexToBytes(userId as `0x${string}`)
+      );
+
+    } catch (error) {
+      console.error("Error in test_wallet_pick:", error);
+      await handler.sendMessage(
+        channelId,
+        "❌ An error occurred while detecting wallets. Please try again later."
+      );
+    }
+  }
+);
+
 // ===== WALLET SELECTION INTERACTION HANDLER =====
 bot.onInteractionResponse(async (handler, event) => {
   const response = event.response;
@@ -993,7 +1102,110 @@ bot.onInteractionResponse(async (handler, event) => {
   const formResponse = response.payload.content.value;
   const requestId = formResponse.requestId;
 
-  // Check if this is a wallet selection response
+  // ===== HANDLE TEST WALLET PICK =====
+  if (requestId.startsWith("test-wallet-pick-")) {
+    const selection = pendingTestSelections.get(requestId);
+    if (!selection) {
+      await handler.sendMessage(
+        event.channelId,
+        "⚠️ Selection expired. Please run `/test_wallet_pick` again."
+      );
+      return;
+    }
+
+    // Extract selected wallet address from button click
+    let selectedAddress: `0x${string}` | null = null;
+
+    for (const component of formResponse.components) {
+      if (component.component.case === "button") {
+        selectedAddress = component.id as `0x${string}`;
+        break;
+      }
+    }
+
+    if (!selectedAddress) {
+      await handler.sendMessage(
+        event.channelId,
+        "⚠️ No wallet selected. Please try again."
+      );
+      return;
+    }
+
+    // Find the selected wallet info
+    const selectedWallet = selection.allWallets.find(
+      (w) => w.address === selectedAddress
+    );
+
+    if (!selectedWallet) {
+      await handler.sendMessage(
+        event.channelId,
+        "⚠️ Invalid wallet selection. Please try again."
+      );
+      return;
+    }
+
+    // Clean up pending selection
+    pendingTestSelections.delete(requestId);
+
+    // Show confirmation
+    const shortAddr = `${selectedAddress.slice(0, 6)}...${selectedAddress.slice(-4)}`;
+    const walletType = selectedWallet.isEOA ? "EOA" : "Smart Account";
+
+    await handler.sendMessage(
+      event.channelId,
+      `✅ **Wallet Selected!**\n\n` +
+      `**Address:** \`${shortAddr}\`\n` +
+      `**Type:** ${walletType}\n` +
+      `**Mainnet Balance:** ${formatEther(selectedWallet.balances.mainnet)} ETH\n` +
+      `**Base Balance:** ${formatEther(selectedWallet.balances.base)} ETH\n\n` +
+      `📝 Preparing test transaction...`
+    );
+
+    // Send zero-value test transaction
+    try {
+      const testTxId = `test-tx-${event.channelId}-${Date.now()}`;
+
+      await handler.sendInteractionRequest(
+        event.channelId,
+        {
+          case: "transaction",
+          value: {
+            id: testTxId,
+            title: "Test Transaction (Zero Value)",
+            content: {
+              case: "evm",
+              value: {
+                chainId: "8453", // Base
+                to: selectedAddress, // Send to self
+                value: "0", // Zero value
+                data: "0x", // No data
+                signerWallet: selectedAddress, // Selected wallet signs
+              },
+            },
+          },
+        },
+        hexToBytes(selection.userId as `0x${string}`)
+      );
+
+      await handler.sendMessage(
+        event.channelId,
+        `📤 **Test transaction sent!**\n\n` +
+        `Please approve the transaction from your selected wallet (\`${shortAddr}\`).\n\n` +
+        `This is a zero-value transaction (no ETH will be transferred).\n` +
+        `You'll only pay gas fees.`
+      );
+    } catch (error) {
+      console.error("Error sending test transaction:", error);
+      await handler.sendMessage(
+        event.channelId,
+        "❌ An error occurred while preparing the test transaction."
+      );
+    }
+
+    return;
+  }
+
+  // ===== HANDLE BRIDGE REGISTER WALLET SELECTION =====
   if (!requestId.startsWith("wallet-select-")) {
     return;
   }
