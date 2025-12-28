@@ -212,3 +212,97 @@ export function formatWalletDisplay(wallet: WalletInfo): string {
     `  • Base: ${baseEth} ETH`
   );
 }
+
+/**
+ * Get wallet capability for a specific registration
+ * Determines which paths (A, B, C) a wallet can use
+ * @param wallet - WalletInfo object
+ * @param requiredMainnet - Required ETH on Mainnet for registration
+ * @param bridgeFee - Estimated bridge fee
+ * @returns WalletCapability with path availability
+ */
+export function getWalletCapability(
+  wallet: WalletInfo,
+  requiredMainnet: bigint,
+  bridgeFee: bigint
+): import("../types/wallet").WalletCapability {
+  // Only EOAs can be used for registration
+  if (!wallet.isEOA) {
+    return {
+      canUsePathA: false,
+      canUsePathB: false,
+      canUsePathC: false,
+      recommendedPath: null,
+      reason: "Smart accounts cannot be used for cross-chain registration",
+    };
+  }
+
+  const canUsePathA = wallet.balances.mainnet >= requiredMainnet;
+  const totalNeededOnBase = requiredMainnet + bridgeFee;
+  const canUsePathB = wallet.balances.base >= totalNeededOnBase;
+
+  // Path C is not applicable for individual wallets (requires smart account + EOA combo)
+  const canUsePathC = false;
+
+  // Determine recommended path
+  let recommendedPath: "A" | "B" | null = null;
+  let reason = "";
+
+  if (canUsePathA) {
+    recommendedPath = "A";
+    reason = `Direct registration on Mainnet (${formatEther(wallet.balances.mainnet)} ETH available)`;
+  } else if (canUsePathB) {
+    recommendedPath = "B";
+    reason = `Bridge from Base to Mainnet (${formatEther(wallet.balances.base)} ETH available)`;
+  } else {
+    reason = `Insufficient funds. Need ${formatEther(requiredMainnet)} ETH on Mainnet or ${formatEther(totalNeededOnBase)} ETH on Base`;
+  }
+
+  return {
+    canUsePathA,
+    canUsePathB,
+    canUsePathC,
+    recommendedPath,
+    reason,
+  };
+}
+
+/**
+ * Determine which path a specific wallet should use
+ * @param wallet - WalletInfo object
+ * @param requiredMainnet - Required ETH on Mainnet
+ * @param bridgeFee - Estimated bridge fee
+ * @returns Flow path ("A", "B", or null if no path available)
+ */
+export function determinePathForWallet(
+  wallet: WalletInfo,
+  requiredMainnet: bigint,
+  bridgeFee: bigint
+): "A" | "B" | "C" | null {
+  const capability = getWalletCapability(wallet, requiredMainnet, bridgeFee);
+  return capability.recommendedPath;
+}
+
+/**
+ * Format wallet for dropdown option display
+ * Shows address, balances, and recommended path
+ * @param wallet - WalletInfo object
+ * @param capability - WalletCapability for this wallet
+ * @returns Formatted option string for interactive form
+ */
+export function formatWalletOption(
+  wallet: WalletInfo,
+  capability: import("../types/wallet").WalletCapability
+): string {
+  const shortAddr = `${wallet.address.slice(0, 6)}...${wallet.address.slice(-4)}`;
+  const mainnetEth = formatEther(wallet.balances.mainnet);
+  const baseEth = formatEther(wallet.balances.base);
+
+  if (capability.recommendedPath === "A") {
+    return `${shortAddr} - Mainnet: ${mainnetEth} ETH (Direct Registration)`;
+  } else if (capability.recommendedPath === "B") {
+    return `${shortAddr} - Base: ${baseEth} ETH (Bridge to Mainnet)`;
+  } else {
+    return `${shortAddr} - Insufficient funds`;
+  }
+}

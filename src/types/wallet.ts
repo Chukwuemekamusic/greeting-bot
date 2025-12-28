@@ -24,3 +24,29 @@ export type RecommendedWallet = {
  * Flow path type for bridge registration
  */
 export type FlowPath = "A" | "B" | "C";
+
+/**
+ * Wallet capability for a specific registration
+ */
+export type WalletCapability = {
+  canUsePathA: boolean;
+  canUsePathB: boolean;
+  canUsePathC: boolean;
+  recommendedPath: FlowPath | null;
+  reason: string;
+};
+
+/**
+ * Pending wallet selection state
+ */
+export type PendingWalletSelection = {
+  userId: string;
+  channelId: string;
+  domain: string;
+  label: string;
+  years: number;
+  allWallets: WalletInfo[];
+  requiredMainnetAmount: bigint;
+  bridgeFee: bigint;
+  timestamp: number;
+};

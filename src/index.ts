@@ -1,5 +1,5 @@
 import { makeTownsBot, getSmartAccountFromUserId } from "@towns-protocol/bot";
-import { hexToBytes, formatEther, parseEther } from "viem";
+import { hexToBytes, formatEther } from "viem";
 import { encodeFunctionData } from "viem";
 import commands from "./commands";
 import {
@@ -24,8 +24,10 @@ import {
   getLinkedWallets,
   filterEOAs,
   getWalletBalances,
-  recommendWallet,
   formatWalletDisplay,
+  getWalletCapability,
+  determinePathForWallet,
+  formatWalletOption,
 } from "./utils/wallets";
 import {
   ENS_CONFIG,
@@ -38,22 +40,23 @@ import {
 import type { CommitmentState } from "./types/ens";
 
 import {
-  checkBalance,
   getBridgeQuote,
-  prepareBridgeTransaction,
   calculateRequiredMainnetETH,
-  prepareSmartAccountToEOATransfer,
   prepareBridgeTransactionEOA,
 } from "./services/bridge";
 
 import { CHAIN_IDS } from "./constants/bridge";
 import type { BridgeState } from "./types/bridge";
+import type { PendingWalletSelection } from "./types/wallet";
 
 // In-memory store for pending commitments
 const pendingCommitments = new Map<string, CommitmentState>();
 
 // In-memory store for pending bridges
 const pendingBridges = new Map<string, BridgeState>();
+
+// In-memory store for pending wallet selections
+const pendingWalletSelections = new Map<string, PendingWalletSelection>();
 
 const bot = await makeTownsBot(
   process.env.APP_PRIVATE_DATA!,
@@ -820,7 +823,7 @@ bot.onSlashCommand(
       }
 
       // Calculate registration cost
-      const { totalWei, totalEth } = await calculateRegistrationCost(
+      const { totalWei } = await calculateRegistrationCost(
         normalized,
         yearsArg
       );
@@ -891,280 +894,84 @@ bot.onSlashCommand(
 
       const bridgeFee = BigInt(bridgeQuote.totalRelayFee.total || "0");
 
-      // Get smart recommendation
-      const recommendation = recommendWallet(
-        allWalletsWithBalances,
-        requiredMainnetETH,
-        bridgeFee
-      );
+      // Filter wallets to get only capable EOAs with sufficient funds
+      const capableWallets = allWalletsWithBalances
+        .filter((w) => w.isEOA) // Only EOAs
+        .map((w) => ({
+          wallet: w,
+          capability: getWalletCapability(w, requiredMainnetETH, bridgeFee),
+        }))
+        .filter((wc) => wc.capability.recommendedPath !== null); // Only wallets with a valid path
 
-      if (!recommendation) {
+      if (capableWallets.length === 0) {
         // No wallet has sufficient funds
         await handler.sendMessage(
           channelId,
-          `❌ **Insufficient funds across all wallets**\n\n` +
-          `**Required:** ${formatEther(requiredMainnetETH)} ETH on Mainnet\n\n` +
+          `❌ **No capable wallets found**\n\n` +
+          `**Required:** ${formatEther(requiredMainnetETH)} ETH on Mainnet OR ${formatEther(requiredMainnetETH + bridgeFee)} ETH on Base\n\n` +
           `**Your Wallets:**\n` +
           allWalletsWithBalances.map(formatWalletDisplay).join('\n\n') +
-          `\n\n**To proceed with bridging, you need:**\n` +
-          `• Bridge amount: ${formatEther(requiredMainnetETH)} ETH\n` +
-          `• Bridge fee: ~${formatEther(bridgeFee)} ETH\n` +
-          `• Gas: ~0.0005 ETH\n` +
-          `• **Total:** ${formatEther(requiredMainnetETH + bridgeFee + parseEther("0.0005"))} ETH\n\n` +
-          `Please fund one of your wallets and try again.`
+          `\n\n**To proceed, you need:**\n` +
+          `• Option A: ${formatEther(requiredMainnetETH)} ETH on Mainnet (direct registration)\n` +
+          `• Option B: ${formatEther(requiredMainnetETH + bridgeFee)} ETH on Base (bridge then register)\n\n` +
+          `Please fund one of your EOA wallets and try again.`
         );
         return;
       }
 
-      // Show recommendation and ask for confirmation
-      const userEOA = recommendation.address;
+      // Create interactive wallet selection form
+      const selectionId = `wallet-select-${channelId}-${userId}-${Date.now()}`;
 
+      // Store selection state
+      pendingWalletSelections.set(selectionId, {
+        userId,
+        channelId,
+        domain: fullName,
+        label: normalized,
+        years: yearsArg,
+        allWallets: capableWallets.map((wc) => wc.wallet),
+        requiredMainnetAmount: requiredMainnetETH,
+        bridgeFee,
+        timestamp: Date.now(),
+      });
+
+      // Build form components - dropdown with wallet options
+      const walletOptions = capableWallets.map((wc) => ({
+        id: wc.wallet.address,
+        component: {
+          case: "button" as const,
+          value: {
+            label: formatWalletOption(wc.wallet, wc.capability),
+          },
+        },
+      }));
+
+      // Show wallet selection form
       await handler.sendMessage(
         channelId,
         `✅ **Wallet Analysis Complete!**\n\n` +
-        `**Detected Wallets:**\n` +
-        allWalletsWithBalances.map((w, i) =>
-          (w.address === userEOA ? '✨ ' : '   ') + formatWalletDisplay(w)
-        ).join('\n\n') +
-        `\n\n**Recommendation:**\n` +
-        `Use \`${userEOA.slice(0, 6)}...${userEOA.slice(-4)}\`\n` +
-        `${recommendation.reason}\n\n` +
-        `**Flow:** Path ${recommendation.path}\n` +
-        `**Est. Cost:** ${formatEther(recommendation.estimatedCost)} ETH\n\n` +
-        `Proceeding with registration...`
+        `Found ${capableWallets.length} capable EOA wallet(s) for registration.\n\n` +
+        `**Domain:** ${fullName}\n` +
+        `**Duration:** ${yearsArg} year${yearsArg > 1 ? 's' : ''}\n` +
+        `**Cost:** ${formatEther(totalWei)} ETH\n\n` +
+        `Please select which wallet to use:`
       );
 
-      // Get user's smart account for potential Path C
-      const userSmartAccount = (await getSmartAccountFromUserId(bot, {
-        userId,
-      })) as `0x${string}`;
-
-      // Execute the recommended path
-      if (recommendation.path === "A") {
-        // PATH A: User has sufficient funds on Mainnet EOA - Direct registration
-        const walletInfo = allWalletsWithBalances.find(w => w.address === userEOA);
-
-        await handler.sendMessage(
-          channelId,
-          `✅ **Sufficient Mainnet balance found!**\n\n` +
-            `• Your Mainnet EOA has ${formatEther(walletInfo?.balances.mainnet || 0n)} ETH\n` +
-            `• Required: ${formatEther(requiredMainnetETH)} ETH\n\n` +
-            `📝 Proceeding directly with ENS registration...`
-        );
-
-        // Generate registration parameters with EOA as owner
-        const params = generateRegistrationParams(
-          normalized,
-          userEOA,
-          yearsArg
-        );
-
-        // Generate commitment hash
-        const commitmentHash = await makeCommitment(params);
-
-        // Create commitment ID
-        const commitmentId = `commit-${channelId}-${userId}-${normalized}`;
-
-        // Store commitment state
-        pendingCommitments.set(commitmentId, {
-          userId,
-          channelId,
-          domain: fullName,
-          label: normalized,
-          commitment: commitmentHash,
-          secret: params.secret,
-          owner: userEOA,
-          duration: params.duration,
-          timestamp: Date.now(),
-        });
-
-        // Prepare commit transaction data
-        const commitData = encodeFunctionData({
-          abi: CONTROLLER_ABI,
-          functionName: "commit",
-          args: [commitmentHash],
-        });
-
-        // Send commit transaction interaction request with signerWallet specified
-        await handler.sendInteractionRequest(
-          channelId,
-          {
-            case: "transaction",
-            value: {
-              id: commitmentId,
-              title: `Commit ENS Registration: ${fullName}`,
-              content: {
-                case: "evm",
-                value: {
-                  chainId: REGISTRATION.CHAIN_ID,
-                  to: ENS_CONFIG.REGISTRAR_CONTROLLER,
-                  value: "0",
-                  data: commitData,
-                  signerWallet: userEOA,
-                },
-              },
-            },
+      // Send interactive form
+      await handler.sendInteractionRequest(
+        channelId,
+        {
+          case: "form",
+          value: {
+            id: selectionId,
+            title: "Select Wallet for Registration",
+            components: walletOptions,
           },
-          hexToBytes(userId as `0x${string}`)
-        );
+        },
+        hexToBytes(userId as `0x${string}`)
+      );
 
-        await handler.sendMessage(
-          channelId,
-          `📤 **Transaction request sent!**\n\n` +
-            `Please approve the commit transaction from your EOA wallet.\n` +
-            `After confirmation, wait 60 seconds before completing registration.`
-        );
-
-        return;
-      } else if (recommendation.path === "B") {
-        // PATH B: User has sufficient funds on Base EOA - Simple bridge
-        const walletInfo = allWalletsWithBalances.find(w => w.address === userEOA);
-
-        const outputAmount =
-          requiredMainnetETH > bridgeFee
-            ? requiredMainnetETH - bridgeFee
-            : 0n;
-        await handler.sendMessage(
-          channelId,
-          `✅ **Base EOA has sufficient funds!**\n\n` +
-            `**Bridge Details:**\n` +
-            `• From: Base EOA (${formatEther(walletInfo?.balances.base || 0n)} ETH)\n` +
-            `• To: Mainnet EOA\n` +
-            `• Amount to bridge: ${formatEther(requiredMainnetETH)} ETH\n` +
-            `• Bridge fee: ~${formatEther(bridgeFee)} ETH\n` +
-            `• You'll receive: ~${formatEther(outputAmount)} ETH on Mainnet\n\n` +
-            `📝 Preparing bridge transaction...`
-        );
-
-        // Prepare EOA-to-EOA bridge transaction
-        const bridgeData = prepareBridgeTransactionEOA(
-          requiredMainnetETH,
-          userEOA,  // depositor (Base EOA)
-          userEOA,  // recipient (Mainnet EOA - same address)
-          outputAmount,
-          CHAIN_IDS.BASE,
-          CHAIN_IDS.MAINNET
-        );
-
-        // Create bridge ID
-        const bridgeId = `bridge-eoa-${channelId}-${userId}-${normalized}`;
-
-        // Store bridge state
-        pendingBridges.set(bridgeId, {
-          userId,
-          channelId,
-          domain: fullName,
-          label: normalized,
-          years: yearsArg,
-          fromChain: CHAIN_IDS.BASE,
-          toChain: CHAIN_IDS.MAINNET,
-          amount: requiredMainnetETH,
-          recipient: userEOA,
-          timestamp: Date.now(),
-          status: "pending",
-        });
-
-        // Send bridge transaction request with signerWallet
-        await handler.sendInteractionRequest(
-          channelId,
-          {
-            case: "transaction",
-            value: {
-              id: bridgeId,
-              title: `Bridge ${formatEther(requiredMainnetETH)} ETH to Mainnet`,
-              content: {
-                case: "evm",
-                value: {
-                  chainId: CHAIN_IDS.BASE.toString(),
-                  to: bridgeData.to,
-                  value: bridgeData.value,
-                  data: bridgeData.data,
-                  signerWallet: userEOA,
-                },
-              },
-            },
-          },
-          hexToBytes(userId as `0x${string}`)
-        );
-
-        await handler.sendMessage(
-          channelId,
-          `📤 **Bridge transaction sent!**\n\n` +
-            `Please approve the bridge from your Base EOA wallet.\n` +
-            `After bridging completes, I'll help you register the domain.`
-        );
-
-        return;
-      } else if (recommendation.path === "C") {
-        // PATH C: Multi-step flow (Smart Account → Base EOA → Mainnet EOA)
-        const baseGasEstimate = parseEther("0.0005");
-        const totalNeededOnBase = requiredMainnetETH + bridgeFee + baseGasEstimate;
-        await handler.sendMessage(
-          channelId,
-          `✅ **Base smart account has sufficient funds!**\n\n` +
-            `**Multi-step process:**\n` +
-            `1️⃣ Transfer ${formatEther(totalNeededOnBase)} ETH from Base smart account → Base EOA\n` +
-            `2️⃣ Bridge ${formatEther(requiredMainnetETH)} ETH from Base EOA → Mainnet EOA\n` +
-            `3️⃣ Register ENS domain from Mainnet EOA\n\n` +
-            `📝 Preparing first transaction...`
-        );
-
-        // Step 1: Prepare transfer from smart account to EOA on Base
-        const transferData = prepareSmartAccountToEOATransfer(
-          totalNeededOnBase,
-          userEOA
-        );
-
-        // Create transfer ID
-        const transferId = `transfer-${channelId}-${userId}-${normalized}`;
-
-        // Store state for tracking multi-step process
-        pendingBridges.set(transferId, {
-          userId,
-          channelId,
-          domain: fullName,
-          label: normalized,
-          years: yearsArg,
-          fromChain: CHAIN_IDS.BASE,
-          toChain: CHAIN_IDS.MAINNET,
-          amount: requiredMainnetETH,
-          recipient: userEOA,
-          timestamp: Date.now(),
-          status: "pending",
-        });
-
-        // Send transfer transaction request
-        await handler.sendInteractionRequest(
-          channelId,
-          {
-            case: "transaction",
-            value: {
-              id: transferId,
-              title: `Transfer ${formatEther(totalNeededOnBase)} ETH to your EOA`,
-              content: {
-                case: "evm",
-                value: {
-                  chainId: CHAIN_IDS.BASE.toString(),
-                  to: transferData.to,
-                  value: transferData.value,
-                  data: transferData.data,
-                  signerWallet: undefined,  // Smart account signs this
-                },
-              },
-            },
-          },
-          hexToBytes(userId as `0x${string}`)
-        );
-
-        await handler.sendMessage(
-          channelId,
-          `📤 **Step 1/3: Transfer transaction sent!**\n\n` +
-            `Please approve the transfer from your smart account.\n` +
-            `After this completes, I'll guide you through the bridging step.`
-        );
-
-        return;
-      }
+      return;
     } catch (error) {
       console.error("Error initiating registration:", error);
       await handler.sendMessage(
@@ -1174,6 +981,275 @@ bot.onSlashCommand(
     }
   }
 );
+
+// ===== WALLET SELECTION INTERACTION HANDLER =====
+bot.onInteractionResponse(async (handler, event) => {
+  const response = event.response;
+
+  if (response.payload.content?.case !== "form") {
+    return;
+  }
+
+  const formResponse = response.payload.content.value;
+  const requestId = formResponse.requestId;
+
+  // Check if this is a wallet selection response
+  if (!requestId.startsWith("wallet-select-")) {
+    return;
+  }
+
+  // Retrieve the pending selection
+  const selection = pendingWalletSelections.get(requestId);
+  if (!selection) {
+    await handler.sendMessage(
+      event.channelId,
+      "⚠️ Selection expired. Please run `/bridge_register` again."
+    );
+    return;
+  }
+
+  // Extract selected wallet address from button click
+  let selectedAddress: `0x${string}` | null = null;
+
+  for (const component of formResponse.components) {
+    if (component.component.case === "button") {
+      // The component ID is the wallet address
+      selectedAddress = component.id as `0x${string}`;
+      break;
+    }
+  }
+
+  if (!selectedAddress) {
+    await handler.sendMessage(
+      event.channelId,
+      "⚠️ No wallet selected. Please try again."
+    );
+    return;
+  }
+
+  // Find the selected wallet
+  const selectedWallet = selection.allWallets.find(
+    (w) => w.address === selectedAddress
+  );
+
+  if (!selectedWallet) {
+    await handler.sendMessage(
+      event.channelId,
+      "⚠️ Invalid wallet selection. Please try again."
+    );
+    return;
+  }
+
+  // Determine which path to use for this wallet
+  const path = determinePathForWallet(
+    selectedWallet,
+    selection.requiredMainnetAmount,
+    selection.bridgeFee
+  );
+
+  if (!path) {
+    await handler.sendMessage(
+      event.channelId,
+      "⚠️ Selected wallet no longer has sufficient funds. Please try again."
+    );
+    return;
+  }
+
+  // Clean up pending selection
+  pendingWalletSelections.delete(requestId);
+
+  // Show confirmation
+  const shortAddr = `${selectedAddress.slice(0, 6)}...${selectedAddress.slice(-4)}`;
+  await handler.sendMessage(
+    event.channelId,
+    `✅ **Wallet Selected:** \`${shortAddr}\`\n\n` +
+    `**Path:** ${path}\n` +
+    `**Domain:** ${selection.domain}\n\n` +
+    `Proceeding with registration...`
+  );
+
+  // Execute the selected path
+  try {
+    // Create clients for blockchain operations
+    const { createPublicClient, http } = await import("viem");
+    const { mainnet, base } = await import("viem/chains");
+
+    const mainnetClient = createPublicClient({
+      chain: mainnet,
+      transport: http(process.env.MAINNET_RPC_URL),
+    });
+
+    const baseClient = createPublicClient({
+      chain: base,
+      transport: http(`https://mainnet.base.org`),
+    });
+
+    if (path === "A") {
+      // PATH A: Direct registration from Mainnet EOA
+      const mainnetBalance = await mainnetClient.getBalance({
+        address: selectedAddress,
+      });
+
+      await handler.sendMessage(
+        event.channelId,
+        `✅ **Sufficient Mainnet balance found!**\n\n` +
+          `• Your Mainnet EOA has ${formatEther(mainnetBalance)} ETH\n` +
+          `• Required: ${formatEther(selection.requiredMainnetAmount)} ETH\n\n` +
+          `📝 Proceeding directly with ENS registration...`
+      );
+
+      // Generate registration parameters with EOA as owner
+      const params = generateRegistrationParams(
+        selection.label,
+        selectedAddress,
+        selection.years
+      );
+
+      // Generate commitment hash
+      const commitmentHash = await makeCommitment(params);
+
+      // Create commitment ID
+      const commitmentId = `commit-${event.channelId}-${selection.userId}-${selection.label}`;
+
+      // Store commitment state
+      pendingCommitments.set(commitmentId, {
+        userId: selection.userId,
+        channelId: event.channelId,
+        domain: selection.domain,
+        label: selection.label,
+        commitment: commitmentHash,
+        secret: params.secret,
+        owner: selectedAddress,
+        duration: params.duration,
+        timestamp: Date.now(),
+      });
+
+      // Prepare commit transaction data
+      const commitData = encodeFunctionData({
+        abi: CONTROLLER_ABI,
+        functionName: "commit",
+        args: [commitmentHash],
+      });
+
+      // Send commit transaction interaction request
+      await handler.sendInteractionRequest(
+        event.channelId,
+        {
+          case: "transaction",
+          value: {
+            id: commitmentId,
+            title: `Commit ENS Registration: ${selection.domain}`,
+            content: {
+              case: "evm",
+              value: {
+                chainId: REGISTRATION.CHAIN_ID,
+                to: ENS_CONFIG.REGISTRAR_CONTROLLER,
+                value: "0",
+                data: commitData,
+                signerWallet: selectedAddress,
+              },
+            },
+          },
+        },
+        hexToBytes(selection.userId as `0x${string}`)
+      );
+
+      await handler.sendMessage(
+        event.channelId,
+        `📤 **Transaction request sent!**\n\n` +
+          `Please approve the commit transaction from your EOA wallet.\n` +
+          `After confirmation, wait 60 seconds before completing registration.`
+      );
+    } else if (path === "B") {
+      // PATH B: Bridge from Base EOA to Mainnet EOA
+      const baseBalance = await baseClient.getBalance({
+        address: selectedAddress,
+      });
+
+      const outputAmount =
+        selection.requiredMainnetAmount > selection.bridgeFee
+          ? selection.requiredMainnetAmount - selection.bridgeFee
+          : 0n;
+
+      await handler.sendMessage(
+        event.channelId,
+        `✅ **Base EOA has sufficient funds!**\n\n` +
+          `**Bridge Details:**\n` +
+          `• From: Base EOA (${formatEther(baseBalance)} ETH)\n` +
+          `• To: Mainnet EOA\n` +
+          `• Amount to bridge: ${formatEther(selection.requiredMainnetAmount)} ETH\n` +
+          `• Bridge fee: ~${formatEther(selection.bridgeFee)} ETH\n` +
+          `• You'll receive: ~${formatEther(outputAmount)} ETH on Mainnet\n\n` +
+          `📝 Preparing bridge transaction...`
+      );
+
+      // Prepare EOA-to-EOA bridge transaction
+      const bridgeData = prepareBridgeTransactionEOA(
+        selection.requiredMainnetAmount,
+        selectedAddress, // depositor (Base EOA)
+        selectedAddress, // recipient (Mainnet EOA - same address)
+        outputAmount,
+        CHAIN_IDS.BASE,
+        CHAIN_IDS.MAINNET
+      );
+
+      // Create bridge ID
+      const bridgeId = `bridge-eoa-${event.channelId}-${selection.userId}-${selection.label}`;
+
+      // Store bridge state
+      pendingBridges.set(bridgeId, {
+        userId: selection.userId,
+        channelId: event.channelId,
+        domain: selection.domain,
+        label: selection.label,
+        years: selection.years,
+        fromChain: CHAIN_IDS.BASE,
+        toChain: CHAIN_IDS.MAINNET,
+        amount: selection.requiredMainnetAmount,
+        recipient: selectedAddress,
+        timestamp: Date.now(),
+        status: "pending",
+      });
+
+      // Send bridge transaction request
+      await handler.sendInteractionRequest(
+        event.channelId,
+        {
+          case: "transaction",
+          value: {
+            id: bridgeId,
+            title: `Bridge ${formatEther(selection.requiredMainnetAmount)} ETH to Mainnet`,
+            content: {
+              case: "evm",
+              value: {
+                chainId: CHAIN_IDS.BASE.toString(),
+                to: bridgeData.to,
+                value: bridgeData.value,
+                data: bridgeData.data,
+                signerWallet: selectedAddress,
+              },
+            },
+          },
+        },
+        hexToBytes(selection.userId as `0x${string}`)
+      );
+
+      await handler.sendMessage(
+        event.channelId,
+        `📤 **Bridge transaction sent!**\n\n` +
+          `Please approve the bridge from your Base EOA wallet.\n` +
+          `After bridging completes, I'll help you register the domain.`
+      );
+    }
+    // Note: Path C is not supported in interactive selection as it requires smart account
+  } catch (error) {
+    console.error("Error executing wallet selection:", error);
+    await handler.sendMessage(
+      event.channelId,
+      "❌ An error occurred while processing your selection. Please try again."
+    );
+  }
+});
 
 bot.onSlashCommand(
   "portfolio",
