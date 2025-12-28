@@ -154,4 +154,58 @@ export const ENS_REGISTRY_ABI = [
     inputs: [{ name: "node", type: "bytes32" }],
     outputs: [{ type: "address" }],
   },
+  {
+    name: "setSubnodeOwner",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "node", type: "bytes32" },
+      { name: "label", type: "bytes32" },
+      { name: "owner", type: "address" },
+    ],
+    outputs: [{ type: "bytes32" }],
+  },
+  {
+    name: "setResolver",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "node", type: "bytes32" },
+      { name: "resolver", type: "address" },
+    ],
+    outputs: [],
+  },
+  {
+    name: "setSubnodeRecord",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "node", type: "bytes32" },
+      { name: "label", type: "bytes32" },
+      { name: "owner", type: "address" },
+      { name: "resolver", type: "address" },
+      { name: "ttl", type: "uint64" },
+    ],
+    outputs: [],
+  },
+] as const;
+
+export const ENS_RESOLVER_ABI = [
+  {
+    name: "setAddr",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "node", type: "bytes32" },
+      { name: "a", type: "address" },
+    ],
+    outputs: [],
+  },
+  {
+    name: "addr",
+    type: "function",
+    stateMutability: "view",
+    inputs: [{ name: "node", type: "bytes32" }],
+    outputs: [{ type: "address" }],
+  },
 ] as const;

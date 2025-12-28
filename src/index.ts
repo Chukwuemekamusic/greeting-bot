@@ -13,6 +13,7 @@ import {
   calculateRegistrationCost,
   prepareDomainTransfer,
 } from "./services/ens";
+import { prepareSubdomainAssignment } from "./services/subdomain";
 import {
   checkAvailabilitySepolia,
   generateRegistrationParamsSepolia,
@@ -34,10 +35,13 @@ import {
   SEPOLIA_ENS_CONFIG,
   CONTROLLER_ABI,
   BASE_REGISTRAR_ABI,
+  ENS_REGISTRY_ABI,
+  ENS_RESOLVER_ABI,
   REGISTRATION,
   ENS_VALIDATION,
 } from "./constants/ens";
 import type { CommitmentState } from "./types/ens";
+import type { SubdomainAssignmentState } from "./types/subdomain";
 
 import {
   getBridgeQuote,
@@ -47,7 +51,10 @@ import {
 
 import { CHAIN_IDS } from "./constants/bridge";
 import type { BridgeState } from "./types/bridge";
-import type { PendingWalletSelection, PendingTestSelection } from "./types/wallet";
+import type {
+  PendingWalletSelection,
+  PendingTestSelection,
+} from "./types/wallet";
 
 // In-memory store for pending commitments
 const pendingCommitments = new Map<string, CommitmentState>();
@@ -60,6 +67,9 @@ const pendingWalletSelections = new Map<string, PendingWalletSelection>();
 
 // In-memory store for pending test selections
 const pendingTestSelections = new Map<string, PendingTestSelection>();
+
+// In-memory store for pending subdomain assignments
+const pendingSubdomainAssignments = new Map<string, SubdomainAssignmentState>();
 
 const bot = await makeTownsBot(
   process.env.APP_PRIVATE_DATA!,
@@ -85,7 +95,8 @@ bot.onSlashCommand("help", async (handler, { channelId }) => {
       "• `/test_register <domain> [years]` - Test ENS registration on Sepolia testnet 🧪\n" +
       "• `/test_transfer <domain> <recipient>` - Transfer ENS domain on Sepolia testnet 🧪\n" +
       "• `/bridge_register <domain> [years]` - Register an ENS domain on mainnet (bridge + gas) 🧪\n" +
-      "• `/test_wallet_pick` - Test wallet selection with all linked wallets 🧪\n\n" +
+      "• `/test_wallet_pick` - Test wallet selection with all linked wallets 🧪\n" +
+      "• `/assign_subdomain <subdomain.domain.eth> <recipient>` - Assign a subdomain to an address\n\n" +
       "**Message Triggers:**\n\n" +
       "• Mention me - I'll respond\n" +
       "• React with 👋 - I'll wave back" +
@@ -836,19 +847,25 @@ bot.onSlashCommand(
       const requiredMainnetETH = calculateRequiredMainnetETH(totalWei);
 
       // === STEP 1: AUTO-DETECT LINKED WALLETS ===
-      await handler.sendMessage(channelId, `🔍 Detecting your linked wallets...`);
+      await handler.sendMessage(
+        channelId,
+        `🔍 Detecting your linked wallets...`
+      );
 
-      const linkedWallets = await getLinkedWallets(bot, userId as `0x${string}`);
+      const linkedWallets = await getLinkedWallets(
+        bot,
+        userId as `0x${string}`
+      );
 
       if (!linkedWallets || linkedWallets.length === 0) {
         await handler.sendMessage(
           channelId,
           `⚠️ **No linked wallets found**\n\n` +
-          `Please link an EOA wallet to your account:\n` +
-          `1. Go to Towns settings\n` +
-          `2. Link your MetaMask/Coinbase wallet\n` +
-          `3. Try again\n\n` +
-          `Smart accounts alone cannot be used for cross-chain operations.`
+            `Please link an EOA wallet to your account:\n` +
+            `1. Go to Towns settings\n` +
+            `2. Link your MetaMask/Coinbase wallet\n` +
+            `3. Try again\n\n` +
+            `Smart accounts alone cannot be used for cross-chain operations.`
         );
         return;
       }
@@ -868,7 +885,10 @@ bot.onSlashCommand(
       });
 
       // Filter to get only EOAs
-      await handler.sendMessage(channelId, `🔍 Analyzing wallet types and balances...`);
+      await handler.sendMessage(
+        channelId,
+        `🔍 Analyzing wallet types and balances...`
+      );
 
       const eoaWallets = await filterEOAs(linkedWallets, baseClient);
 
@@ -876,8 +896,8 @@ bot.onSlashCommand(
         await handler.sendMessage(
           channelId,
           `⚠️ **No EOA wallets found**\n\n` +
-          `You have ${linkedWallets.length} linked wallet(s), but they are all smart accounts.\n\n` +
-          `Please link an EOA wallet (MetaMask, Coinbase, etc.) to use this feature.`
+            `You have ${linkedWallets.length} linked wallet(s), but they are all smart accounts.\n\n` +
+            `Please link an EOA wallet (MetaMask, Coinbase, etc.) to use this feature.`
         );
         return;
       }
@@ -912,13 +932,21 @@ bot.onSlashCommand(
         await handler.sendMessage(
           channelId,
           `❌ **No capable wallets found**\n\n` +
-          `**Required:** ${formatEther(requiredMainnetETH)} ETH on Mainnet OR ${formatEther(requiredMainnetETH + bridgeFee)} ETH on Base\n\n` +
-          `**Your Wallets:**\n` +
-          allWalletsWithBalances.map(formatWalletDisplay).join('\n\n') +
-          `\n\n**To proceed, you need:**\n` +
-          `• Option A: ${formatEther(requiredMainnetETH)} ETH on Mainnet (direct registration)\n` +
-          `• Option B: ${formatEther(requiredMainnetETH + bridgeFee)} ETH on Base (bridge then register)\n\n` +
-          `Please fund one of your EOA wallets and try again.`
+            `**Required:** ${formatEther(
+              requiredMainnetETH
+            )} ETH on Mainnet OR ${formatEther(
+              requiredMainnetETH + bridgeFee
+            )} ETH on Base\n\n` +
+            `**Your Wallets:**\n` +
+            allWalletsWithBalances.map(formatWalletDisplay).join("\n\n") +
+            `\n\n**To proceed, you need:**\n` +
+            `• Option A: ${formatEther(
+              requiredMainnetETH
+            )} ETH on Mainnet (direct registration)\n` +
+            `• Option B: ${formatEther(
+              requiredMainnetETH + bridgeFee
+            )} ETH on Base (bridge then register)\n\n` +
+            `Please fund one of your EOA wallets and try again.`
         );
         return;
       }
@@ -954,11 +982,11 @@ bot.onSlashCommand(
       await handler.sendMessage(
         channelId,
         `✅ **Wallet Analysis Complete!**\n\n` +
-        `Found ${capableWallets.length} capable EOA wallet(s) for registration.\n\n` +
-        `**Domain:** ${fullName}\n` +
-        `**Duration:** ${yearsArg} year${yearsArg > 1 ? 's' : ''}\n` +
-        `**Cost:** ${formatEther(totalWei)} ETH\n\n` +
-        `Please select which wallet to use:`
+          `Found ${capableWallets.length} capable EOA wallet(s) for registration.\n\n` +
+          `**Domain:** ${fullName}\n` +
+          `**Duration:** ${yearsArg} year${yearsArg > 1 ? "s" : ""}\n` +
+          `**Cost:** ${formatEther(totalWei)} ETH\n\n` +
+          `Please select which wallet to use:`
       );
 
       // Send interactive form
@@ -991,16 +1019,22 @@ bot.onSlashCommand(
   "test_wallet_pick",
   async (handler, { channelId, userId }) => {
     try {
-      await handler.sendMessage(channelId, `🔍 Detecting your linked wallets...`);
+      await handler.sendMessage(
+        channelId,
+        `🔍 Detecting your linked wallets...`
+      );
 
       // Get all linked wallets (no filtering - include smart accounts)
-      const linkedWallets = await getLinkedWallets(bot, userId as `0x${string}`);
+      const linkedWallets = await getLinkedWallets(
+        bot,
+        userId as `0x${string}`
+      );
 
       if (!linkedWallets || linkedWallets.length === 0) {
         await handler.sendMessage(
           channelId,
           `⚠️ **No linked wallets found**\n\n` +
-          `Please link a wallet to your account in Towns settings.`
+            `Please link a wallet to your account in Towns settings.`
         );
         return;
       }
@@ -1020,7 +1054,10 @@ bot.onSlashCommand(
       });
 
       // Get balance information for ALL wallets (including smart accounts)
-      await handler.sendMessage(channelId, `🔍 Analyzing wallet types and balances...`);
+      await handler.sendMessage(
+        channelId,
+        `🔍 Analyzing wallet types and balances...`
+      );
 
       const allWalletsWithBalances = await Promise.all(
         linkedWallets.map((wallet) =>
@@ -1041,7 +1078,10 @@ bot.onSlashCommand(
 
       // Build form components - buttons for all wallets
       const walletOptions = allWalletsWithBalances.map((wallet) => {
-        const shortAddr = `${wallet.address.slice(0, 6)}...${wallet.address.slice(-4)}`;
+        const shortAddr = `${wallet.address.slice(
+          0,
+          6
+        )}...${wallet.address.slice(-4)}`;
         const type = wallet.isEOA ? "EOA" : "Smart Account";
         const mainnetEth = formatEther(wallet.balances.mainnet);
         const baseEth = formatEther(wallet.balances.base);
@@ -1061,10 +1101,10 @@ bot.onSlashCommand(
       await handler.sendMessage(
         channelId,
         `✅ **Wallet Detection Complete!**\n\n` +
-        `Found ${allWalletsWithBalances.length} linked wallet(s).\n\n` +
-        `**Your Wallets:**\n` +
-        allWalletsWithBalances.map(formatWalletDisplay).join('\n\n') +
-        `\n\n**Select a wallet to test with:**`
+          `Found ${allWalletsWithBalances.length} linked wallet(s).\n\n` +
+          `**Your Wallets:**\n` +
+          allWalletsWithBalances.map(formatWalletDisplay).join("\n\n") +
+          `\n\n**Select a wallet to test with:**`
       );
 
       // Send interactive form
@@ -1080,12 +1120,149 @@ bot.onSlashCommand(
         },
         hexToBytes(userId as `0x${string}`)
       );
-
     } catch (error) {
       console.error("Error in test_wallet_pick:", error);
       await handler.sendMessage(
         channelId,
         "❌ An error occurred while detecting wallets. Please try again later."
+      );
+    }
+  }
+);
+
+// ===== ASSIGN SUBDOMAIN COMMAND =====
+bot.onSlashCommand(
+  "assign_subdomain",
+  async (handler, { channelId, args, userId }) => {
+    try {
+      // Step 1: Validate arguments
+      if (!args || args.length < 2) {
+        await handler.sendMessage(
+          channelId,
+          "❌ **Invalid usage**\n\n" +
+            "**Syntax:** `/assign_subdomain <subdomain.domain.eth> <recipient>`\n\n" +
+            "**Example:** `/assign_subdomain alice.mydomain.eth vitalik.eth`\n" +
+            "**Example:** `/assign_subdomain alice.mydomain.eth 0x1234...5678`"
+        );
+        return;
+      }
+
+      const subdomainInput = args[0];
+      const recipientInput = args[1];
+
+      await handler.sendMessage(
+        channelId,
+        `🔍 **Preparing subdomain assignment...**\n\n` +
+          `• Subdomain: **${subdomainInput}**\n` +
+          `• Recipient: **${recipientInput}**`
+      );
+
+      // Step 2: Prepare and validate the subdomain assignment
+      const prepareResult = await prepareSubdomainAssignment(
+        subdomainInput,
+        recipientInput,
+        bot,
+        userId as `0x${string}`
+      );
+
+      if (!prepareResult.success) {
+        await handler.sendMessage(
+          channelId,
+          `❌ **Validation Failed**\n\n${prepareResult.reason}`
+        );
+        return;
+      }
+
+      const {
+        fullName,
+        subdomain,
+        domain,
+        parentNode,
+        subdomainNode,
+        labelHash,
+        recipient,
+        ownerWallet,
+      } = prepareResult;
+
+      // Step 3: Display validation success
+      await handler.sendMessage(
+        channelId,
+        `✅ **Validation Passed!**\n\n` +
+          `• Subdomain: **${fullName}**\n` +
+          `• Parent Domain: **${domain}.eth**\n` +
+          `• Owner Wallet: \`${ownerWallet!.slice(0, 6)}...${ownerWallet!.slice(
+            -4
+          )}\`\n` +
+          `• Recipient: \`${recipient!.slice(0, 6)}...${recipient!.slice(
+            -4
+          )}\`\n\n` +
+          `📝 **Setup Process:**\n` +
+          `This will create a fully configured subdomain in **one atomic transaction**:\n` +
+          `• Create subdomain and set owner\n` +
+          `• Set ENS Public Resolver\n` +
+          `• Point subdomain to recipient's address\n\n` +
+          `🔐 **Preparing transaction...**`
+      );
+
+      // Step 4: Prepare transaction data
+      // Using setSubnodeRecord to set owner + resolver in one atomic call
+      const setSubnodeRecordData = encodeFunctionData({
+        abi: ENS_REGISTRY_ABI,
+        functionName: "setSubnodeRecord",
+        args: [parentNode!, labelHash!, recipient!, ENS_CONFIG.PUBLIC_RESOLVER, 0n],
+      });
+
+      // Step 5: Create state for tracking single transaction
+      const assignmentId = `subdomain-${channelId}-${Date.now()}`;
+
+      pendingSubdomainAssignments.set(assignmentId, {
+        userId,
+        channelId,
+        subdomain: subdomain!,
+        domain: domain!,
+        fullName: fullName!,
+        recipient: recipient!,
+        ownerWallet: ownerWallet!,
+        timestamp: Date.now(),
+      });
+
+      // Step 6: Send single transaction request with setSubnodeRecord
+      await handler.sendInteractionRequest(
+        channelId,
+        {
+          case: "transaction",
+          value: {
+            id: assignmentId,
+            title: `Assign ${fullName}`,
+            content: {
+              case: "evm",
+              value: {
+                chainId: REGISTRATION.CHAIN_ID, // Mainnet
+                to: ENS_CONFIG.ENS_REGISTRY,
+                value: "0",
+                data: setSubnodeRecordData,
+                signerWallet: ownerWallet, // The EOA wallet that owns the parent domain
+              },
+            },
+          },
+        },
+        hexToBytes(userId as `0x${string}`)
+      );
+
+      await handler.sendMessage(
+        channelId,
+        `📤 **Transaction sent!**\n\n` +
+          `Please approve the transaction to create and configure the subdomain.\n\n` +
+          `This will set up **${fullName}** with:\n` +
+          `• Owner: Recipient\n` +
+          `• Resolver: ENS Public Resolver\n` +
+          `• Ready for address configuration`
+      );
+    } catch (error) {
+      console.error("Error in assign_subdomain:", error);
+      await handler.sendMessage(
+        channelId,
+        "❌ An unexpected error occurred. Please try again later."
       );
     }
   }
@@ -1148,17 +1325,23 @@ bot.onInteractionResponse(async (handler, event) => {
     pendingTestSelections.delete(requestId);
 
     // Show confirmation
-    const shortAddr = `${selectedAddress.slice(0, 6)}...${selectedAddress.slice(-4)}`;
+    const shortAddr = `${selectedAddress.slice(0, 6)}...${selectedAddress.slice(
+      -4
+    )}`;
     const walletType = selectedWallet.isEOA ? "EOA" : "Smart Account";
 
     await handler.sendMessage(
       event.channelId,
       `✅ **Wallet Selected!**\n\n` +
-      `**Address:** \`${shortAddr}\`\n` +
-      `**Type:** ${walletType}\n` +
-      `**Mainnet Balance:** ${formatEther(selectedWallet.balances.mainnet)} ETH\n` +
-      `**Base Balance:** ${formatEther(selectedWallet.balances.base)} ETH\n\n` +
-      `📝 Preparing test transaction...`
+        `**Address:** \`${shortAddr}\`\n` +
+        `**Type:** ${walletType}\n` +
+        `**Mainnet Balance:** ${formatEther(
+          selectedWallet.balances.mainnet
+        )} ETH\n` +
+        `**Base Balance:** ${formatEther(
+          selectedWallet.balances.base
+        )} ETH\n\n` +
+        `📝 Preparing test transaction...`
     );
 
     // Send zero-value test transaction
@@ -1190,9 +1373,9 @@ bot.onInteractionResponse(async (handler, event) => {
       await handler.sendMessage(
         event.channelId,
         `📤 **Test transaction sent!**\n\n` +
-        `Please approve the transaction from your selected wallet (\`${shortAddr}\`).\n\n` +
-        `This is a zero-value transaction (no ETH will be transferred).\n` +
-        `You'll only pay gas fees.`
+          `Please approve the transaction from your selected wallet (\`${shortAddr}\`).\n\n` +
+          `This is a zero-value transaction (no ETH will be transferred).\n` +
+          `You'll only pay gas fees.`
       );
     } catch (error) {
       console.error("Error sending test transaction:", error);
@@ -1271,13 +1454,15 @@ bot.onInteractionResponse(async (handler, event) => {
   pendingWalletSelections.delete(requestId);
 
   // Show confirmation
-  const shortAddr = `${selectedAddress.slice(0, 6)}...${selectedAddress.slice(-4)}`;
+  const shortAddr = `${selectedAddress.slice(0, 6)}...${selectedAddress.slice(
+    -4
+  )}`;
   await handler.sendMessage(
     event.channelId,
     `✅ **Wallet Selected:** \`${shortAddr}\`\n\n` +
-    `**Path:** ${path}\n` +
-    `**Domain:** ${selection.domain}\n\n` +
-    `Proceeding with registration...`
+      `**Path:** ${path}\n` +
+      `**Domain:** ${selection.domain}\n\n` +
+      `Proceeding with registration...`
   );
 
   // Execute the selected path
@@ -1306,7 +1491,9 @@ bot.onInteractionResponse(async (handler, event) => {
         event.channelId,
         `✅ **Sufficient Mainnet balance found!**\n\n` +
           `• Your Mainnet EOA has ${formatEther(mainnetBalance)} ETH\n` +
-          `• Required: ${formatEther(selection.requiredMainnetAmount)} ETH\n\n` +
+          `• Required: ${formatEther(
+            selection.requiredMainnetAmount
+          )} ETH\n\n` +
           `📝 Proceeding directly with ENS registration...`
       );
 
@@ -1389,7 +1576,9 @@ bot.onInteractionResponse(async (handler, event) => {
           `**Bridge Details:**\n` +
           `• From: Base EOA (${formatEther(baseBalance)} ETH)\n` +
           `• To: Mainnet EOA\n` +
-          `• Amount to bridge: ${formatEther(selection.requiredMainnetAmount)} ETH\n` +
+          `• Amount to bridge: ${formatEther(
+            selection.requiredMainnetAmount
+          )} ETH\n` +
           `• Bridge fee: ~${formatEther(selection.bridgeFee)} ETH\n` +
           `• You'll receive: ~${formatEther(outputAmount)} ETH on Mainnet\n\n` +
           `📝 Preparing bridge transaction...`
@@ -1430,7 +1619,9 @@ bot.onInteractionResponse(async (handler, event) => {
           case: "transaction",
           value: {
             id: bridgeId,
-            title: `Bridge ${formatEther(selection.requiredMainnetAmount)} ETH to Mainnet`,
+            title: `Bridge ${formatEther(
+              selection.requiredMainnetAmount
+            )} ETH to Mainnet`,
             content: {
               case: "evm",
               value: {
@@ -1896,6 +2087,45 @@ bot.onInteractionResponse(async (handler, event) => {
           `The commitment is still valid for 24 hours. You can try again with the same domain.`
       );
     }
+  }
+  // Check if this is a subdomain assignment transaction
+  else if (requestId.startsWith("subdomain-")) {
+    const state = pendingSubdomainAssignments.get(requestId);
+
+    if (!state) {
+      console.error(`No subdomain assignment found for ID: ${requestId}`);
+      return;
+    }
+
+    // Handle transaction failure/cancellation
+    if (!txResponse.txHash) {
+      await handler.sendMessage(
+        channelId,
+        `❌ **Transaction cancelled**\n\n` +
+          `Subdomain assignment for **${state.fullName}** has been cancelled.\n` +
+          `You can try again with \`/assign_subdomain ${state.fullName} ${state.recipient}\``
+      );
+      pendingSubdomainAssignments.delete(requestId);
+      return;
+    }
+
+    // Handle successful transaction
+    await handler.sendMessage(
+      channelId,
+      `🎉 **Subdomain assignment complete!**\n\n` +
+        `**${state.fullName}** is now configured and live!\n\n` +
+        `📋 **Summary:**\n` +
+        `• Subdomain: **${state.fullName}**\n` +
+        `• Owner: \`${state.recipient.slice(0, 6)}...${state.recipient.slice(
+          -4
+        )}\`\n` +
+        `• Resolver: ENS Public Resolver\n` +
+        `• Transaction: [View on Etherscan](https://etherscan.io/tx/${txResponse.txHash})\n\n` +
+        `✨ The subdomain is now ready! The recipient can set additional records like ETH address using the ENS app.`
+    );
+
+    // Clean up the assignment state
+    pendingSubdomainAssignments.delete(requestId);
   }
 });
 

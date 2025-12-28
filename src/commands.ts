@@ -47,6 +47,10 @@ const commands = [
     name: "test_wallet_pick",
     description: "Test wallet selection (includes all wallet types)",
   },
+  {
+    name: "assign_subdomain",
+    description: "Assign a subdomain to an address",
+  },
 ] as const satisfies BotCommand[];
 
 export default commands;
