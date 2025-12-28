@@ -19,7 +19,14 @@ import {
   makeCommitmentSepolia,
   calculateRegistrationCostSepolia,
 } from "./services/ens-sepolia";
-import { normalizeENSName } from "./utils/ens";
+import { normalizeENSName, isValidEOAAddress, getBalance } from "./utils/ens";
+import {
+  getLinkedWallets,
+  filterEOAs,
+  getWalletBalances,
+  recommendWallet,
+  formatWalletDisplay,
+} from "./utils/wallets";
 import {
   ENS_CONFIG,
   SEPOLIA_ENS_CONFIG,
@@ -35,6 +42,8 @@ import {
   getBridgeQuote,
   prepareBridgeTransaction,
   calculateRequiredMainnetETH,
+  prepareSmartAccountToEOATransfer,
+  prepareBridgeTransactionEOA,
 } from "./services/bridge";
 
 import { CHAIN_IDS } from "./constants/bridge";
@@ -751,12 +760,12 @@ bot.onSlashCommand(
     if (!args || args.length === 0) {
       await handler.sendMessage(
         channelId,
-        "⚠️ Please provide a domain name to register.\n\nUsage: `/bridge_register <domain> [years]`\n\nExample: `/bridge_register myname` (1 year)\nExample: `/bridge_register myname 2` (2 years)"
+        "⚠️ Please provide a domain name to register.\n\nUsage: `/bridge_register <domain> [years]`\n\nExample: `/bridge_register myname` (1 year)\nExample: `/bridge_register myname 2` (2 years)\n\n✨ Your linked wallets will be detected automatically!"
       );
       return;
     }
 
-    // Parse arguments
+    // Parse arguments (no EOA address needed anymore!)
     const domainArg = args[0];
     const yearsArg = args[1] ? parseInt(args[1]) : 1;
 
@@ -764,7 +773,7 @@ bot.onSlashCommand(
     if (isNaN(yearsArg) || yearsArg < 1 || yearsArg > 10) {
       await handler.sendMessage(
         channelId,
-        "⚠️ Invalid duration. Please specify 1-10 years.\n\nExample: `/register myname 2`"
+        "⚠️ Invalid duration. Please specify 1-10 years.\n\nExample: `/bridge_register myname 2`"
       );
       return;
     }
@@ -816,135 +825,229 @@ bot.onSlashCommand(
         yearsArg
       );
 
-      // Get user's wallet address
-      const userWallet = (await getSmartAccountFromUserId(bot, {
-        userId,
-      })) as `0x${string}`;
-
       // Calculate total ETH needed on Mainnet (registration + gas + buffer)
       const requiredMainnetETH = calculateRequiredMainnetETH(totalWei);
 
-      // Check user's balance on Mainnet
-      await handler.sendMessage(channelId, `Checking your Mainnet balance...`);
+      // === STEP 1: AUTO-DETECT LINKED WALLETS ===
+      await handler.sendMessage(channelId, `🔍 Detecting your linked wallets...`);
 
-      const mainnetBalance = await checkBalance(
-        userWallet,
-        CHAIN_IDS.MAINNET,
-        requiredMainnetETH
-      );
+      const linkedWallets = await getLinkedWallets(bot, userId as `0x${string}`);
 
-      if (!mainnetBalance.sufficient) {
-        // User doesn't have enough on Mainnet, check Base balance
-        await handler.sendMessage(channelId, `Checking your Base balance...`);
-
-        const baseBalance = await checkBalance(userWallet, CHAIN_IDS.BASE);
-
-        // Get bridge quote first to calculate total needed including fees
-        await handler.sendMessage(channelId, `Getting bridge quote...`);
-        const bridgeQuote = await getBridgeQuote(
-          requiredMainnetETH,
-          CHAIN_IDS.BASE,
-          CHAIN_IDS.MAINNET
-        );
-
-        if (bridgeQuote.isAmountTooLow) {
-          await handler.sendMessage(
-            channelId,
-            `❌ Amount too low for bridge. Minimum: ${formatEther(
-              BigInt(bridgeQuote.limits.minDeposit)
-            )} ETH`
-          );
-          return;
-        }
-
-        // Calculate output amount after bridge fees
-        const bridgeFeeWei = BigInt(bridgeQuote.totalRelayFee.total);
-        const outputAmount =
-          requiredMainnetETH > bridgeFeeWei
-            ? requiredMainnetETH - bridgeFeeWei
-            : 0n;
-
-        // Validate that output amount covers registration cost
-        if (outputAmount < totalWei) {
-          await handler.sendMessage(
-            channelId,
-            `❌ **Bridge fees too high**\n\n` +
-              `After bridge fees of ${formatEther(bridgeFeeWei)} ETH, ` +
-              `you would only receive ${formatEther(
-                outputAmount
-              )} ETH on Mainnet.\n\n` +
-              `This is not enough to cover the registration cost of ${totalEth} ETH.\n\n` +
-              `Please fund your Mainnet wallet directly or wait for lower fees.`
-          );
-          return;
-        }
-
-        // Estimate gas needed on Base for bridge transaction (rough estimate)
-        const baseGasEstimate = parseEther("0.0005");
-        const totalNeededOnBase =
-          requiredMainnetETH + bridgeFeeWei + baseGasEstimate;
-
-        if (baseBalance.balance < totalNeededOnBase) {
-          // User doesn't have enough on Base to cover bridge + fees + gas
-          const shortfall = totalNeededOnBase - baseBalance.balance;
-          await handler.sendMessage(
-            channelId,
-            `❌ **Insufficient funds**\n\n` +
-              `You need ${formatEther(
-                requiredMainnetETH
-              )} ETH on Ethereum Mainnet to register ${fullName}.\n\n` +
-              `**To bridge from Base, you need:**\n` +
-              `• Bridge amount: ${formatEther(requiredMainnetETH)} ETH\n` +
-              `• Bridge fee: ${formatEther(bridgeFeeWei)} ETH (${
-                bridgeQuote.totalRelayFee.pct
-              }%)\n` +
-              `• Gas on Base: ~${formatEther(baseGasEstimate)} ETH\n` +
-              `• **Total needed on Base:** ${formatEther(
-                totalNeededOnBase
-              )} ETH\n\n` +
-              `**Your balances:**\n` +
-              `• Mainnet: ${mainnetBalance.balanceEth} ETH\n` +
-              `• Base: ${baseBalance.balanceEth} ETH\n\n` +
-              `You need ${formatEther(
-                shortfall
-              )} more ETH on Base to complete the bridge.`
-          );
-          return;
-        }
-
-        // User has enough on Base, show bridge details
+      if (!linkedWallets || linkedWallets.length === 0) {
         await handler.sendMessage(
           channelId,
-          `💡 **Bridge Required**\n\n` +
-            `**Registration Details:**\n` +
-            `• Domain: ${fullName}\n` +
-            `• Registration cost: ${totalEth} ETH\n` +
-            `• Total needed (incl. gas): ${formatEther(
-              requiredMainnetETH
-            )} ETH\n\n` +
-            `**Bridge Details:**\n` +
-            `• From: Base (${baseBalance.balanceEth} ETH available)\n` +
-            `• To: Ethereum Mainnet\n` +
-            `• Bridge fee: ~${formatEther(bridgeFeeWei)} ETH (${
-              bridgeQuote.totalRelayFee.pct
-            }%)\n` +
-            `• You'll receive: ~${formatEther(outputAmount)} ETH on Mainnet\n` +
-            `• Estimated time: ~${bridgeQuote.estimatedFillTimeSec} seconds\n\n` +
-            `⚠️ **Note:** The domain might be taken during bridging if it's popular.\n\n` +
-            `Preparing bridge transaction...`
+          `⚠️ **No linked wallets found**\n\n` +
+          `Please link an EOA wallet to your account:\n` +
+          `1. Go to Towns settings\n` +
+          `2. Link your MetaMask/Coinbase wallet\n` +
+          `3. Try again\n\n` +
+          `Smart accounts alone cannot be used for cross-chain operations.`
+        );
+        return;
+      }
+
+      // Create clients for balance checking
+      const { createPublicClient, http } = await import("viem");
+      const { mainnet, base } = await import("viem/chains");
+
+      const mainnetClient = createPublicClient({
+        chain: mainnet,
+        transport: http(process.env.MAINNET_RPC_URL),
+      });
+
+      const baseClient = createPublicClient({
+        chain: base,
+        transport: http(`https://mainnet.base.org`),
+      });
+
+      // Filter to get only EOAs
+      await handler.sendMessage(channelId, `🔍 Analyzing wallet types and balances...`);
+
+      const eoaWallets = await filterEOAs(linkedWallets, baseClient);
+
+      if (eoaWallets.length === 0) {
+        await handler.sendMessage(
+          channelId,
+          `⚠️ **No EOA wallets found**\n\n` +
+          `You have ${linkedWallets.length} linked wallet(s), but they are all smart accounts.\n\n` +
+          `Please link an EOA wallet (MetaMask, Coinbase, etc.) to use this feature.`
+        );
+        return;
+      }
+
+      // Get balance information for all wallets
+      const allWalletsWithBalances = await Promise.all(
+        linkedWallets.map((wallet) =>
+          getWalletBalances(wallet, mainnetClient, baseClient)
+        )
+      );
+
+      // Get bridge quote to calculate total needed
+      const bridgeQuote = await getBridgeQuote(
+        requiredMainnetETH,
+        CHAIN_IDS.BASE,
+        CHAIN_IDS.MAINNET
+      );
+
+      const bridgeFee = BigInt(bridgeQuote.totalRelayFee.total || "0");
+
+      // Get smart recommendation
+      const recommendation = recommendWallet(
+        allWalletsWithBalances,
+        requiredMainnetETH,
+        bridgeFee
+      );
+
+      if (!recommendation) {
+        // No wallet has sufficient funds
+        await handler.sendMessage(
+          channelId,
+          `❌ **Insufficient funds across all wallets**\n\n` +
+          `**Required:** ${formatEther(requiredMainnetETH)} ETH on Mainnet\n\n` +
+          `**Your Wallets:**\n` +
+          allWalletsWithBalances.map(formatWalletDisplay).join('\n\n') +
+          `\n\n**To proceed with bridging, you need:**\n` +
+          `• Bridge amount: ${formatEther(requiredMainnetETH)} ETH\n` +
+          `• Bridge fee: ~${formatEther(bridgeFee)} ETH\n` +
+          `• Gas: ~0.0005 ETH\n` +
+          `• **Total:** ${formatEther(requiredMainnetETH + bridgeFee + parseEther("0.0005"))} ETH\n\n` +
+          `Please fund one of your wallets and try again.`
+        );
+        return;
+      }
+
+      // Show recommendation and ask for confirmation
+      const userEOA = recommendation.address;
+
+      await handler.sendMessage(
+        channelId,
+        `✅ **Wallet Analysis Complete!**\n\n` +
+        `**Detected Wallets:**\n` +
+        allWalletsWithBalances.map((w, i) =>
+          (w.address === userEOA ? '✨ ' : '   ') + formatWalletDisplay(w)
+        ).join('\n\n') +
+        `\n\n**Recommendation:**\n` +
+        `Use \`${userEOA.slice(0, 6)}...${userEOA.slice(-4)}\`\n` +
+        `${recommendation.reason}\n\n` +
+        `**Flow:** Path ${recommendation.path}\n` +
+        `**Est. Cost:** ${formatEther(recommendation.estimatedCost)} ETH\n\n` +
+        `Proceeding with registration...`
+      );
+
+      // Get user's smart account for potential Path C
+      const userSmartAccount = (await getSmartAccountFromUserId(bot, {
+        userId,
+      })) as `0x${string}`;
+
+      // Execute the recommended path
+      if (recommendation.path === "A") {
+        // PATH A: User has sufficient funds on Mainnet EOA - Direct registration
+        const walletInfo = allWalletsWithBalances.find(w => w.address === userEOA);
+
+        await handler.sendMessage(
+          channelId,
+          `✅ **Sufficient Mainnet balance found!**\n\n` +
+            `• Your Mainnet EOA has ${formatEther(walletInfo?.balances.mainnet || 0n)} ETH\n` +
+            `• Required: ${formatEther(requiredMainnetETH)} ETH\n\n` +
+            `📝 Proceeding directly with ENS registration...`
         );
 
-        // Prepare bridge transaction with correct outputAmount
-        const bridgeData = prepareBridgeTransaction(
+        // Generate registration parameters with EOA as owner
+        const params = generateRegistrationParams(
+          normalized,
+          userEOA,
+          yearsArg
+        );
+
+        // Generate commitment hash
+        const commitmentHash = await makeCommitment(params);
+
+        // Create commitment ID
+        const commitmentId = `commit-${channelId}-${userId}-${normalized}`;
+
+        // Store commitment state
+        pendingCommitments.set(commitmentId, {
+          userId,
+          channelId,
+          domain: fullName,
+          label: normalized,
+          commitment: commitmentHash,
+          secret: params.secret,
+          owner: userEOA,
+          duration: params.duration,
+          timestamp: Date.now(),
+        });
+
+        // Prepare commit transaction data
+        const commitData = encodeFunctionData({
+          abi: CONTROLLER_ABI,
+          functionName: "commit",
+          args: [commitmentHash],
+        });
+
+        // Send commit transaction interaction request with signerWallet specified
+        await handler.sendInteractionRequest(
+          channelId,
+          {
+            case: "transaction",
+            value: {
+              id: commitmentId,
+              title: `Commit ENS Registration: ${fullName}`,
+              content: {
+                case: "evm",
+                value: {
+                  chainId: REGISTRATION.CHAIN_ID,
+                  to: ENS_CONFIG.REGISTRAR_CONTROLLER,
+                  value: "0",
+                  data: commitData,
+                  signerWallet: userEOA,
+                },
+              },
+            },
+          },
+          hexToBytes(userId as `0x${string}`)
+        );
+
+        await handler.sendMessage(
+          channelId,
+          `📤 **Transaction request sent!**\n\n` +
+            `Please approve the commit transaction from your EOA wallet.\n` +
+            `After confirmation, wait 60 seconds before completing registration.`
+        );
+
+        return;
+      } else if (recommendation.path === "B") {
+        // PATH B: User has sufficient funds on Base EOA - Simple bridge
+        const walletInfo = allWalletsWithBalances.find(w => w.address === userEOA);
+
+        const outputAmount =
+          requiredMainnetETH > bridgeFee
+            ? requiredMainnetETH - bridgeFee
+            : 0n;
+        await handler.sendMessage(
+          channelId,
+          `✅ **Base EOA has sufficient funds!**\n\n` +
+            `**Bridge Details:**\n` +
+            `• From: Base EOA (${formatEther(walletInfo?.balances.base || 0n)} ETH)\n` +
+            `• To: Mainnet EOA\n` +
+            `• Amount to bridge: ${formatEther(requiredMainnetETH)} ETH\n` +
+            `• Bridge fee: ~${formatEther(bridgeFee)} ETH\n` +
+            `• You'll receive: ~${formatEther(outputAmount)} ETH on Mainnet\n\n` +
+            `📝 Preparing bridge transaction...`
+        );
+
+        // Prepare EOA-to-EOA bridge transaction
+        const bridgeData = prepareBridgeTransactionEOA(
           requiredMainnetETH,
-          userWallet,
+          userEOA,  // depositor (Base EOA)
+          userEOA,  // recipient (Mainnet EOA - same address)
           outputAmount,
           CHAIN_IDS.BASE,
           CHAIN_IDS.MAINNET
         );
 
         // Create bridge ID
-        const bridgeId = `bridge-${channelId}-${userId}-${normalized}`;
+        const bridgeId = `bridge-eoa-${channelId}-${userId}-${normalized}`;
 
         // Store bridge state
         pendingBridges.set(bridgeId, {
@@ -956,12 +1059,12 @@ bot.onSlashCommand(
           fromChain: CHAIN_IDS.BASE,
           toChain: CHAIN_IDS.MAINNET,
           amount: requiredMainnetETH,
-          recipient: userWallet,
+          recipient: userEOA,
           timestamp: Date.now(),
           status: "pending",
         });
 
-        // Send bridge transaction request
+        // Send bridge transaction request with signerWallet
         await handler.sendInteractionRequest(
           channelId,
           {
@@ -976,7 +1079,7 @@ bot.onSlashCommand(
                   to: bridgeData.to,
                   value: bridgeData.value,
                   data: bridgeData.data,
-                  signerWallet: undefined,
+                  signerWallet: userEOA,
                 },
               },
             },
@@ -987,88 +1090,81 @@ bot.onSlashCommand(
         await handler.sendMessage(
           channelId,
           `📤 **Bridge transaction sent!**\n\n` +
-            `Please approve the bridge transaction in your wallet.\n` +
-            `Once confirmed, I'll automatically proceed with ENS registration.`
+            `Please approve the bridge from your Base EOA wallet.\n` +
+            `After bridging completes, I'll help you register the domain.`
+        );
+
+        return;
+      } else if (recommendation.path === "C") {
+        // PATH C: Multi-step flow (Smart Account → Base EOA → Mainnet EOA)
+        const baseGasEstimate = parseEther("0.0005");
+        const totalNeededOnBase = requiredMainnetETH + bridgeFee + baseGasEstimate;
+        await handler.sendMessage(
+          channelId,
+          `✅ **Base smart account has sufficient funds!**\n\n` +
+            `**Multi-step process:**\n` +
+            `1️⃣ Transfer ${formatEther(totalNeededOnBase)} ETH from Base smart account → Base EOA\n` +
+            `2️⃣ Bridge ${formatEther(requiredMainnetETH)} ETH from Base EOA → Mainnet EOA\n` +
+            `3️⃣ Register ENS domain from Mainnet EOA\n\n` +
+            `📝 Preparing first transaction...`
+        );
+
+        // Step 1: Prepare transfer from smart account to EOA on Base
+        const transferData = prepareSmartAccountToEOATransfer(
+          totalNeededOnBase,
+          userEOA
+        );
+
+        // Create transfer ID
+        const transferId = `transfer-${channelId}-${userId}-${normalized}`;
+
+        // Store state for tracking multi-step process
+        pendingBridges.set(transferId, {
+          userId,
+          channelId,
+          domain: fullName,
+          label: normalized,
+          years: yearsArg,
+          fromChain: CHAIN_IDS.BASE,
+          toChain: CHAIN_IDS.MAINNET,
+          amount: requiredMainnetETH,
+          recipient: userEOA,
+          timestamp: Date.now(),
+          status: "pending",
+        });
+
+        // Send transfer transaction request
+        await handler.sendInteractionRequest(
+          channelId,
+          {
+            case: "transaction",
+            value: {
+              id: transferId,
+              title: `Transfer ${formatEther(totalNeededOnBase)} ETH to your EOA`,
+              content: {
+                case: "evm",
+                value: {
+                  chainId: CHAIN_IDS.BASE.toString(),
+                  to: transferData.to,
+                  value: transferData.value,
+                  data: transferData.data,
+                  signerWallet: undefined,  // Smart account signs this
+                },
+              },
+            },
+          },
+          hexToBytes(userId as `0x${string}`)
+        );
+
+        await handler.sendMessage(
+          channelId,
+          `📤 **Step 1/3: Transfer transaction sent!**\n\n` +
+            `Please approve the transfer from your smart account.\n` +
+            `After this completes, I'll guide you through the bridging step.`
         );
 
         return;
       }
-
-      // User has enough on Mainnet, proceed directly with ENS registration
-      // Generate registration parameters
-      const params = generateRegistrationParams(
-        normalized,
-        userWallet,
-        yearsArg
-      );
-
-      // Generate commitment hash
-      const commitmentHash = await makeCommitment(params);
-
-      // Create commitment ID (using channelId + userId + domain for uniqueness)
-      const commitmentId = `commit-${channelId}-${userId}-${normalized}`;
-
-      // Store commitment state
-      pendingCommitments.set(commitmentId, {
-        userId,
-        channelId,
-        domain: fullName,
-        label: normalized,
-        commitment: commitmentHash,
-        secret: params.secret,
-        owner: userWallet,
-        duration: params.duration,
-        timestamp: Date.now(),
-      });
-
-      // Send confirmation message
-      await handler.sendMessage(
-        channelId,
-        `✅ **${fullName}** is available!\n\n` +
-          `📋 **Registration Details:**\n` +
-          `• Duration: ${yearsArg} year${yearsArg > 1 ? "s" : ""}\n` +
-          `• Cost: ${totalEth} ETH\n` +
-          `• Owner: \`${userWallet}\`\n\n` +
-          `🔐 **Starting registration process...**\n` +
-          `Step 1/2: Submitting commitment transaction...`
-      );
-
-      // Prepare commit transaction data
-      const commitData = encodeFunctionData({
-        abi: CONTROLLER_ABI,
-        functionName: "commit",
-        args: [commitmentHash],
-      });
-
-      // Send commit transaction interaction request
-      await handler.sendInteractionRequest(
-        channelId,
-        {
-          case: "transaction",
-          value: {
-            id: commitmentId,
-            title: `Commit ENS Registration: ${fullName}`,
-            content: {
-              case: "evm",
-              value: {
-                chainId: REGISTRATION.CHAIN_ID,
-                to: ENS_CONFIG.REGISTRAR_CONTROLLER,
-                value: "0",
-                data: commitData,
-                signerWallet: undefined,
-              },
-            },
-          },
-        },
-        hexToBytes(userId as `0x${string}`)
-      );
-
-      await handler.sendMessage(
-        channelId,
-        `📤 **Transaction request sent!**\n\n` +
-          `Please approve the commit transaction in your wallet.\n` +
-          `After confirmation, you'll need to wait 60 seconds before completing the registration.`
-      );
     } catch (error) {
       console.error("Error initiating registration:", error);
       await handler.sendMessage(

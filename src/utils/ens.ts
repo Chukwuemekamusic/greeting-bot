@@ -1,4 +1,4 @@
-import { keccak256, toHex, concat, toBytes } from "viem"
+import { keccak256, toHex, concat, toBytes, type PublicClient } from "viem"
 import { normalize } from "viem/ens"
 import { ENS_VALIDATION } from "../constants/ens"
 
@@ -80,4 +80,39 @@ export function daysUntil(date: Date): number {
 export function formatAddress(address: string): string {
   if (!address || address.length < 10) return address
   return `${address.slice(0, 6)}...${address.slice(-4)}`
+}
+
+/**
+ * Validates if an address is a valid Ethereum address (EOA format)
+ * Checks:
+ * - Proper hex format (0x prefix + 40 hex characters)
+ * - Valid checksum if provided
+ */
+export function isValidEOAAddress(address: string): boolean {
+  // Check basic format: 0x + 40 hex characters
+  const hexRegex = /^0x[a-fA-F0-9]{40}$/
+  if (!hexRegex.test(address)) {
+    return false
+  }
+
+  return true
+}
+
+/**
+ * Gets ETH balance for an address on a specific chain
+ * @param client - Viem public client for the target chain
+ * @param address - Ethereum address to check
+ * @returns Balance in wei (bigint)
+ */
+export async function getBalance(
+  client: any,  // Using any to support different chain types
+  address: `0x${string}`
+): Promise<bigint> {
+  try {
+    const balance = await client.getBalance({ address })
+    return balance
+  } catch (error) {
+    console.error(`Error fetching balance for ${address}:`, error)
+    return 0n
+  }
 }

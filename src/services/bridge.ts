@@ -307,3 +307,80 @@ export async function extractDepositId(
     return null;
   }
 }
+
+/**
+ * Prepare transaction data for transferring ETH from smart account to EOA on Base
+ * This is a simple ETH transfer using the smart account's execute function
+ */
+export function prepareSmartAccountToEOATransfer(
+  amount: bigint,
+  toAddress: `0x${string}`
+): {
+  to: `0x${string}`;
+  value: string;
+  data: `0x${string}`;
+} {
+  // For a simple ETH transfer, we just need to send value to the recipient
+  // The smart account will handle the execution
+  return {
+    to: toAddress,
+    value: amount.toString(),
+    data: "0x" as `0x${string}`, // Empty data for simple ETH transfer
+  };
+}
+
+/**
+ * Prepare bridge transaction for EOA to EOA bridging (Base -> Mainnet)
+ * Unlike smart account bridging, this uses the EOA as both depositor and recipient
+ */
+export function prepareBridgeTransactionEOA(
+  amount: bigint,
+  depositor: `0x${string}`,
+  recipient: `0x${string}`,
+  outputAmount: bigint,
+  fromChainId: number = CHAIN_IDS.BASE,
+  toChainId: number = CHAIN_IDS.MAINNET
+): {
+  to: `0x${string}`;
+  value: string;
+  data: `0x${string}`;
+} {
+  const spokePoolAddress =
+    fromChainId === CHAIN_IDS.BASE
+      ? ACROSS_SPOKE_POOL.BASE
+      : ACROSS_SPOKE_POOL.MAINNET;
+
+  const inputToken =
+    fromChainId === CHAIN_IDS.BASE ? WETH_ADDRESS.BASE : WETH_ADDRESS.MAINNET;
+  const outputToken =
+    toChainId === CHAIN_IDS.MAINNET ? WETH_ADDRESS.MAINNET : WETH_ADDRESS.BASE;
+
+  // Get current timestamp for the quote
+  const quoteTimestamp = Math.floor(Date.now() / 1000);
+
+  // Encode the depositV3 function call
+  const data = encodeFunctionData({
+    abi: spokePoolAbiV3,
+    functionName: "depositV3",
+    args: [
+      depositor, // depositor (EOA on origin chain)
+      recipient, // recipient (EOA on destination chain)
+      inputToken, // inputToken (WETH on origin chain)
+      outputToken, // outputToken (WETH on destination chain)
+      amount, // inputAmount (amount to bridge)
+      outputAmount, // outputAmount (amount after fees)
+      BigInt(toChainId), // destinationChainId
+      "0x0000000000000000000000000000000000000000" as `0x${string}`, // exclusiveRelayer (none)
+      quoteTimestamp, // quoteTimestamp (current time)
+      0, // fillDeadline (0 = no deadline)
+      0, // exclusivityDeadline (0 = no exclusivity period)
+      "0x" as `0x${string}`, // message (empty)
+    ],
+  });
+
+  return {
+    to: spokePoolAddress,
+    value: amount.toString(),
+    data,
+  };
+}
